@@ -55,6 +55,8 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
+  flutter_native_splash: ^2.4.3
 
 flutter:
   uses-material-design: true
@@ -68,4 +70,24 @@ flutter:
     - assets/tessdata/eng.traineddata  # English language file (explicit path for our code)
     # - assets/tessdata/ara.traineddata  # REMOVED: Use EasyOCR for Arabic
     # - assets/tessdata/urd.traineddata  # REMOVED: Use EasyOCR for Urdu
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  min_sdk_android: 21
+  web:
+    generate: false
+  windows:
+    generate: false
+
+flutter_native_splash:
+  color: "#0B3B30"
+  color_dark: "#0B3B30"
+  fullscreen: true
+  android_12:
+    color: "#0B3B30"
+    icon_background_color: "#0B3B30"
+    color_dark: "#0B3B30"
+    icon_background_color_dark: "#0B3B30"
 

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:app_links/app_links.dart';
@@ -17,6 +18,7 @@ import 'screens/crop_image_page.dart';
 import 'screens/audio_trimming_page.dart';
 import 'screens/voice_input_page.dart';
 import 'screens/reset_password_screen.dart';
+import 'screens/splash_screen.dart';
 import 'services/auth_service.dart';
 import 'services/onboarding_service.dart';
 import 'models/user_model.dart';
@@ -29,7 +31,8 @@ import 'screens/translations_page.dart';
 import 'services/translation_service.dart';
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+  FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
 
   // Catch uncaught Flutter errors
   FlutterError.onError = (FlutterErrorDetails details) {
@@ -45,6 +48,7 @@ Future<void> main() async {
       // Quick check for placeholder Firebase config
       if ((opts.apiKey ?? '').contains('CHANGE_ME') ||
           (opts.appId ?? '').contains('CHANGE_ME')) {
+        FlutterNativeSplash.remove();
         runApp(const ErrorApp(
           message:
               'Firebase is not configured. Update lib/firebase_options.dart or run `flutterfire configure`.',
@@ -53,15 +57,22 @@ Future<void> main() async {
       }
 
       await Firebase.initializeApp(options: opts);
-      await TranslationService.instance.init();
       debugPrint('✓ Firebase initialized');
     } else {
       debugPrint('✓ Firebase already initialized');
     }
 
+    // Remove native splash and show Flutter immediately.
+    // TranslationService init runs in the background — the SplashScreen
+    // animation (~4 s) gives it ample time to finish.
+    FlutterNativeSplash.remove();
     runApp(const MyApp());
+    TranslationService.instance.init().catchError(
+      (Object e) => debugPrint('Translation init error: $e'),
+    );
   } catch (e, st) {
     debugPrint('Firebase initialization failed: $e\n$st');
+    FlutterNativeSplash.remove();
     runApp(ErrorApp(message: 'Failed to initialize Firebase: $e'));
   }
 }
@@ -90,7 +101,7 @@ class MyApp extends StatelessWidget {
           darkTheme: AppThemeDark.dark,
 
           // ── Initial screen & named routes ───────────────────────────────
-          home: const AuthWrapper(),
+          home: const SplashScreen(nextScreen: AuthWrapper()),
           routes: {
             '/history': (context) {
               final args = ModalRoute.of(context)?.settings.arguments;
