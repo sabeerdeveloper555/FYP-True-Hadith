@@ -1,9 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:app_links/app_links.dart';
-
 import 'firebase_options.dart'; // Firebase configuration
 import 'screens/onboarding_screen.dart';
 import 'screens/login_screen.dart';
@@ -17,16 +18,15 @@ import 'screens/result_detail_page.dart';
 import 'screens/crop_image_page.dart';
 import 'screens/audio_trimming_page.dart';
 import 'screens/voice_input_page.dart';
-import 'screens/reset_password_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/auth_service.dart';
 import 'services/onboarding_service.dart';
 import 'models/user_model.dart';
 import 'models/hadith_models.dart';
 import 'utils/theme_notifier.dart';
-import 'utils/url_handler.dart';
 import 'core/theme/app_theme.dart';
 import 'core/theme/app_theme_dark.dart';
+import 'screens/reset_password_screen.dart';
 import 'screens/translations_page.dart';
 import 'services/translation_service.dart';
 
@@ -62,6 +62,8 @@ Future<void> main() async {
       debugPrint('✓ Firebase already initialized');
     }
 
+    // Register FCM background handler before runApp so FCM can deliver
+    // notifications even when the app is terminated.
     // Remove native splash and show Flutter immediately.
     // TranslationService init runs in the background — the SplashScreen
     // animation (~4 s) gives it ample time to finish.
@@ -82,6 +84,9 @@ Future<void> main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
+  static final GlobalKey<NavigatorState> navigatorKey =
+      GlobalKey<NavigatorState>();
+
   @override
   Widget build(BuildContext context) {
     // ListenableBuilder rebuilds MaterialApp whenever the theme toggle is tapped,
@@ -92,6 +97,7 @@ class MyApp extends StatelessWidget {
         return MaterialApp(
           title: 'True Hadith',
           debugShowCheckedModeBanner: false,
+          navigatorKey: MyApp.navigatorKey,
 
           // ── Theme mode driven by ThemeNotifier ──────────────────────────
           themeMode: ThemeNotifier.instance.themeMode,
@@ -174,16 +180,6 @@ class MyApp extends StatelessWidget {
             '/crop_image': (context) => const CropImagePage(),
             '/audio_trimming': (context) => const AudioTrimmingPage(),
             '/voice_input': (context) => const VoiceInputPage(),
-            '/reset-password': (context) {
-              final args = ModalRoute.of(context)?.settings.arguments;
-              if (args is Map<String, dynamic>) {
-                return ResetPasswordScreen(
-                  actionCode: args['actionCode'] as String?,
-                  email: args['email'] as String?,
-                );
-              }
-              return const ResetPasswordScreen();
-            },
           },
         );
       },
@@ -247,7 +243,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
   bool _isLoading = true;
   bool _showOnboarding = false;
   late final Stream<User?> _authStateStream;
-  final AppLinks _appLinks = AppLinks();
+  StreamSubscription<Uri>? _linkSubscription;
 
   @override
   void initState() {
@@ -270,53 +266,52 @@ class _AuthWrapperState extends State<AuthWrapper> {
       }
     });
 
-    // Listen for deep links (password reset)
-    _initDeepLinkListener();
+    _initDeepLinks();
   }
 
-  void _initDeepLinkListener() {
-    // Handle initial link (if app was opened from a link)
-    _appLinks.getInitialLink().then((uri) {
-      if (uri != null) {
-        _handleDeepLink(uri.toString());
-      }
-    });
+  Future<void> _initDeepLinks() async {
+    final appLinks = AppLinks();
 
-    // Listen for incoming links while app is running
-    _appLinks.uriLinkStream.listen((uri) {
-      _handleDeepLink(uri.toString());
-    }, onError: (err) {
-      debugPrint('Deep link error: $err');
-    });
-  }
-
-  void _handleDeepLink(String link) {
-    debugPrint('🔗 Deep link received: $link');
-
-    // Check if it's a password reset link
-    if (UrlHandler.isPasswordResetUrl(link)) {
-      final actionCode = UrlHandler.extractActionCodeFromUrl(link);
-      final email = UrlHandler.extractEmailFromUrl(link);
-
-      if (actionCode != null) {
-        debugPrint('✅ Password reset action code detected: $actionCode');
-
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (context) => ResetPasswordScreen(
-                  actionCode: actionCode,
-                  email: email,
-                ),
-              ),
-            );
-          }
-        });
-      } else {
-        debugPrint('⚠️ No action code found in deep link');
-      }
+    // Handle deep link that launched the app from a cold start.
+    final initialLink = await appLinks.getInitialLink();
+    if (initialLink != null) {
+      _handleDeepLink(initialLink);
     }
+
+    // Handle deep links while the app is already running.
+    _linkSubscription = appLinks.uriLinkStream.listen(_handleDeepLink);
+  }
+
+  void _handleDeepLink(Uri uri) {
+    debugPrint('🔗 Deep link received: $uri');
+
+    String? oobCode;
+
+    if (uri.scheme == 'truehadith' && uri.host == 'reset-password') {
+      // Custom scheme: truehadith://reset-password?oobCode=...
+      oobCode = uri.queryParameters['oobCode'];
+    } else if (uri.scheme == 'https' &&
+        uri.path.contains('/__/auth/action') &&
+        uri.queryParameters['mode'] == 'resetPassword') {
+      // Firebase HTTPS action link intercepted via App Links
+      oobCode = uri.queryParameters['oobCode'];
+    }
+
+    if (oobCode != null && oobCode.isNotEmpty) {
+      debugPrint('✅ Password reset action code detected: $oobCode');
+      final code = oobCode;
+      MyApp.navigatorKey.currentState?.push(
+        MaterialPageRoute(
+          builder: (_) => ResetPasswordScreen(actionCode: code),
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _checkOnboardingStatus() async {
@@ -368,6 +363,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
       }
     }
   }
+
 
   void _onUserDataUpdated(UserModel updatedUser) {
     if (mounted) {

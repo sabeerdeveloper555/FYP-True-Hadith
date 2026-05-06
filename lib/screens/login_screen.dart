@@ -68,6 +68,134 @@ class _LoginScreenState extends State<LoginScreen>
     });
   }
 
+  Future<void> _showForgotPasswordDialog() async {
+    final emailController = TextEditingController(
+      text: _emailController.text.trim(),
+    );
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        bool isSending = false;
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            return AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              title: const Text('Reset Password'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Enter your email and we'll send you a link to reset your password.",
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: emailController,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: InputDecoration(
+                      labelText: 'Email',
+                      prefixIcon: const Icon(
+                        Icons.email_outlined,
+                        color: AppColors.primary,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(
+                          color: AppColors.primary,
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed:
+                      isSending ? null : () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  onPressed: isSending
+                      ? null
+                      : () async {
+                          final email = emailController.text.trim();
+                          if (email.isEmpty || !email.contains('@')) {
+                            ScaffoldMessenger.of(ctx).showSnackBar(
+                              const SnackBar(
+                                content: Text('Please enter a valid email'),
+                              ),
+                            );
+                            return;
+                          }
+                          setDialogState(() => isSending = true);
+                          try {
+                            await AuthService.sendPasswordResetEmail(email);
+                            if (dialogContext.mounted) {
+                              Navigator.pop(dialogContext);
+                            }
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Password reset email sent! Check your inbox.',
+                                  ),
+                                  backgroundColor: AppColors.success,
+                                  duration: Duration(seconds: 5),
+                                ),
+                              );
+                            }
+                          } on Exception catch (e) {
+                            setDialogState(() => isSending = false);
+                            final msg =
+                                e.toString().replaceAll('Exception: ', '');
+                            if (ctx.mounted) {
+                              ScaffoldMessenger.of(ctx).showSnackBar(
+                                SnackBar(
+                                  content: Text('Error: $msg'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            }
+                          }
+                        },
+                  child: isSending
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Text(
+                          'Send Reset Link',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    emailController.dispose();
+  }
+
   Future<void> _handleSubmit() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -147,228 +275,6 @@ class _LoginScreenState extends State<LoginScreen>
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
-  }
-
-  Future<void> _showForgotPasswordDialog() async {
-    final isDark = ThemeNotifier.instance.isDark;
-    final emailController = TextEditingController(
-      text: _emailController.text.trim(),
-    );
-    final dialogFormKey = GlobalKey<FormState>();
-    bool isSending = false;
-
-    return showDialog(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
-              ),
-              title: Row(
-                children: [
-                  Icon(
-                    Icons.lock_reset,
-                    color: AppColors.primary,
-                    size: 28,
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    'Reset Password',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: ThemeColors.textPrimary(isDark),
-                    ),
-                  ),
-                ],
-              ),
-              content: Form(
-                key: dialogFormKey,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Enter your email address and we\'ll send you a link to reset your password.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: ThemeColors.textSecondary(isDark),
-                        height: 1.4,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    TextFormField(
-                      controller: emailController,
-                      keyboardType: TextInputType.emailAddress,
-                      enabled: !isSending,
-                      autofocus: emailController.text.isEmpty,
-                      decoration: InputDecoration(
-                        labelText: 'Email',
-                        labelStyle: TextStyle(
-                          color: ThemeColors.textSecondary(isDark),
-                          fontSize: 15,
-                        ),
-                        prefixIcon: const Icon(
-                          Icons.email_outlined,
-                          color: AppColors.primary,
-                        ),
-                        filled: true,
-                        fillColor: ThemeColors.inputBackground(isDark),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(
-                            color: AppColors.border,
-                            width: 1,
-                          ),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                            color: AppColors.primary,
-                            width: 2,
-                          ),
-                        ),
-                        errorBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                            color: AppColors.error,
-                            width: 1,
-                          ),
-                        ),
-                        focusedErrorBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                            color: AppColors.error,
-                            width: 2,
-                          ),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 16,
-                        ),
-                      ),
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter your email';
-                        }
-                        if (!value.contains('@') || !value.contains('.')) {
-                          return 'Please enter a valid email';
-                        }
-                        return null;
-                      },
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: isSending
-                      ? null
-                      : () => Navigator.of(dialogContext).pop(),
-                  child: Text(
-                    'Cancel',
-                    style: TextStyle(
-                      color: ThemeColors.textSecondary(isDark),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                ElevatedButton(
-                  onPressed: isSending
-                      ? null
-                      : () async {
-                          if (!dialogFormKey.currentState!.validate()) {
-                            return;
-                          }
-
-                          final email = emailController.text.trim();
-
-                          setDialogState(() {
-                            isSending = true;
-                          });
-
-                          try {
-                            // Send password reset email using Firebase's default handler
-                            // The link will open in the browser where user can reset their password
-                            await AuthService.sendPasswordResetEmail(email);
-
-                            if (mounted) {
-                              Navigator.of(dialogContext).pop();
-
-                              // Update the email field in login form if it was empty
-                              if (_emailController.text.trim().isEmpty) {
-                                _emailController.text = email;
-                              }
-
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'Password reset email sent! Click the link in your email to reset your password.',
-                                  ),
-                                  backgroundColor: AppColors.success,
-                                  duration: Duration(seconds: 5),
-                                ),
-                              );
-                            }
-                          } catch (e) {
-                            setDialogState(() {
-                              isSending = false;
-                            });
-
-                            if (mounted) {
-                              ScaffoldMessenger.of(dialogContext).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'Error: ${e.toString().replaceAll('Exception: ', '')}',
-                                  ),
-                                  backgroundColor: Colors.red,
-                                  duration: const Duration(seconds: 4),
-                                ),
-                              );
-                            }
-                          }
-                        },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: Colors.white,
-                    disabledBackgroundColor: ThemeColors.textSecondary(isDark),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 12,
-                    ),
-                  ),
-                  child: isSending
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(Colors.white),
-                          ),
-                        )
-                      : const Text(
-                          'Send Reset Link',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
   }
 
   @override
@@ -623,20 +529,27 @@ class _LoginScreenState extends State<LoginScreen>
                                     },
                                   ),
 
-                                  // Forgot password (only for login)
+                                  const SizedBox(height: 8),
+
+                                  // Forgot Password (login mode only)
                                   if (_isLogin) ...[
-                                    const SizedBox(height: 8),
                                     Align(
                                       alignment: Alignment.centerRight,
-                                      child: CustomTextButton(
-                                        text: 'Forgot Password?',
-                                        onPressed: () =>
-                                            _showForgotPasswordDialog(),
+                                      child: GestureDetector(
+                                        onTap: _showForgotPasswordDialog,
+                                        child: const Text(
+                                          'Forgot Password?',
+                                          style: TextStyle(
+                                            color: AppColors.primary,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 14,
+                                          ),
+                                        ),
                                       ),
                                     ),
-                                  ],
-
-                                  const SizedBox(height: 24),
+                                    const SizedBox(height: 16),
+                                  ] else
+                                    const SizedBox(height: 16),
 
                                   // Submit button
                                   CustomButton(

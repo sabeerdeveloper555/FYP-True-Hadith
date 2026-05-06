@@ -19,6 +19,9 @@
     <!-- Permission for speech recognition -->
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
 
+    <!-- Required for push notifications on Android 13+ (API 33+) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
         android:label="true_hadith"
         android:name="${applicationName}"
@@ -68,6 +71,16 @@
                     android:pathPrefix="/__/auth/action"/>
             </intent-filter>
         </activity>
+
+        <!-- FCM: default notification channel used when the app is in background/terminated -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="true_hadith_main"/>
+
+        <!-- FCM: default notification icon (should be a monochrome drawable for Android 5+) -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/launcher_icon"/>
 
         <!-- Flutter embedding version -->
         <meta-data

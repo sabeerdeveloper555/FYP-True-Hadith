@@ -47,6 +47,10 @@ dependencies:
   # Deep linking for password reset
   app_links: ^6.3.1
 
+  # Push notifications
+  firebase_messaging: ^16.2.0
+  flutter_local_notifications: ^17.2.4
+
   # Share content
   share_plus: ^10.1.4
   google_fonts: ^8.0.2

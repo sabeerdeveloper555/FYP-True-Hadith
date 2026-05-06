@@ -102,22 +102,13 @@ class AuthService {
     }
   }
 
-  /// Send password reset email with deep link settings so the app handles the reset
+  /// Send password reset email.
+  /// Firebase uses the Action URL set in Firebase Console → Authentication →
+  /// Templates → Password reset. Set that to: truehadith://reset-password
+  /// so the link opens the app directly via the custom URL scheme.
   static Future<void> sendPasswordResetEmail(String email) async {
     try {
-      final ActionCodeSettings actionCodeSettings = ActionCodeSettings(
-        // Must be an authorized domain — firebaseapp.com domains are authorized by default
-        url: 'https://true-hadith-e3f19.firebaseapp.com/reset-password',
-        handleCodeInApp: true,
-        androidPackageName: 'com.example.true_hadith',
-        androidInstallApp: true,
-        androidMinimumVersion: '1',
-        iOSBundleId: 'com.example.trueHadith',
-      );
-      await _auth.sendPasswordResetEmail(
-        email: email,
-        actionCodeSettings: actionCodeSettings,
-      );
+      await _auth.sendPasswordResetEmail(email: email);
     } on FirebaseAuthException catch (e) {
       throw Exception(_getFirebaseErrorMessage(e.code, e.message));
     } catch (e) {
