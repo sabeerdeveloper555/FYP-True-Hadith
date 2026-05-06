@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1091000729274",
+    "project_id": "true-hadith-e3f19",
+    "storage_bucket": "true-hadith-e3f19.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1091000729274:android:57874a589b173e6b588c83",
+        "android_client_info": {
+          "package_name": "com.example.true_hadith"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBlum1bmXkWoqVD_jn9B-ep6n2utb2pWAs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

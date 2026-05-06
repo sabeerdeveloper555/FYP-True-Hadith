@@ -1,0 +1,215 @@
+@startuml True Hadith Application - Use Case Diagram
+
+!define PRIMARY_COLOR #4A90E2
+!define SECONDARY_COLOR #7B68EE
+!define SUCCESS_COLOR #50C878
+!define WARNING_COLOR #FFA500
+
+skinparam actor {
+    BackgroundColor PRIMARY_COLOR
+    BorderColor #2E5C8A
+    FontColor white
+    FontSize 14
+    FontStyle bold
+}
+
+skinparam usecase {
+    BackgroundColor #F0F8FF
+    BorderColor PRIMARY_COLOR
+    FontColor #2C3E50
+    FontSize 12
+}
+
+skinparam package {
+    BackgroundColor #E8F4F8
+    BorderColor PRIMARY_COLOR
+    FontColor #2C3E50
+    FontSize 13
+    FontStyle bold
+}
+
+skinparam arrow {
+    Color PRIMARY_COLOR
+    Thickness 2
+}
+
+left to right direction
+
+actor "User" as user
+
+package "Authentication & Onboarding" {
+    usecase "Complete Onboarding" as UC1
+    usecase "Register Account" as UC2
+    usecase "Login to Account" as UC3
+    usecase "Reset Password" as UC4
+    usecase "Logout" as UC5
+}
+
+package "Profile Management" {
+    usecase "View Profile" as UC6
+    usecase "Upload Profile Photo" as UC7
+    usecase "Update Profile Photo" as UC8
+    usecase "Delete Profile Photo" as UC9
+}
+
+package "Hadith Search" {
+    usecase "Search by Text Input" as UC10
+    usecase "Search by Voice Input" as UC11
+    usecase "Search by Image (Camera)" as UC12
+    usecase "Search by Image (Gallery)" as UC13
+    usecase "Search by Audio File" as UC14
+    usecase "Crop Image" as UC15
+    usecase "Trim Audio" as UC16
+    usecase "Extract Text from Image (OCR)" as UC17
+    usecase "Transcribe Audio to Text" as UC18
+}
+
+package "Search Results & Details" {
+    usecase "View Search Results" as UC19
+    usecase "View Hadith Details" as UC20
+    usecase "View Hadith in Arabic" as UC21
+    usecase "View Hadith in English" as UC22
+    usecase "View Hadith in Urdu" as UC23
+    usecase "View Hadith Grade" as UC24
+    usecase "View Narrator Information" as UC25
+}
+
+package "Bookmark Management" {
+    usecase "Bookmark Hadith" as UC26
+    usecase "View Bookmarked Hadiths" as UC27
+    usecase "View Bookmark Details" as UC28
+    usecase "Remove Bookmark" as UC29
+}
+
+package "Search History" {
+    usecase "View Search History" as UC30
+    usecase "View History Entry Details" as UC31
+    usecase "Re-search from History" as UC32
+    usecase "Delete History Entry" as UC33
+}
+
+package "AI Chatbot" {
+    usecase "Open AI Chatbot" as UC34
+    usecase "Send Message to AI" as UC35
+    usecase "Receive AI Response" as UC36
+    usecase "View Chat History" as UC37
+    usecase "Ask Questions about Hadiths" as UC38
+}
+
+' User connections to Authentication & Onboarding
+user --> UC1 : First time user
+user --> UC2 : New user
+user --> UC3 : Existing user
+user --> UC4 : Forgot password
+user --> UC5 : End session
+
+' User connections to Profile Management
+user --> UC6 : View profile info
+user --> UC7 : Add photo
+user --> UC8 : Change photo
+user --> UC9 : Remove photo
+
+' User connections to Hadith Search
+user --> UC10 : Type query
+user --> UC11 : Speak query
+user --> UC12 : Take photo
+user --> UC13 : Select image
+user --> UC14 : Upload audio
+user --> UC15 : Adjust image
+user --> UC16 : Select audio segment
+user --> UC17 : Extract text
+user --> UC18 : Convert speech
+
+' User connections to Search Results & Details
+user --> UC19 : Browse results
+user --> UC20 : Read full hadith
+user --> UC21 : Read Arabic text
+user --> UC22 : Read English text
+user --> UC23 : Read Urdu text
+user --> UC24 : Check authenticity
+user --> UC25 : Learn about narrator
+
+' User connections to Bookmark Management
+user --> UC26 : Save hadith
+user --> UC27 : View saved
+user --> UC28 : Read saved
+user --> UC29 : Remove saved
+
+' User connections to Search History
+user --> UC30 : View past searches
+user --> UC31 : See search details
+user --> UC32 : Repeat search
+user --> UC33 : Clear entry
+
+' User connections to AI Chatbot
+user --> UC34 : Access chatbot
+user --> UC35 : Ask question
+user --> UC36 : Get answer
+user --> UC37 : Review conversation
+user --> UC38 : Learn about hadiths
+
+' Relationships between use cases
+UC12 ..> UC15 : uses
+UC13 ..> UC15 : uses
+UC15 ..> UC17 : triggers
+UC14 ..> UC16 : uses
+UC16 ..> UC18 : triggers
+UC17 ..> UC10 : provides input
+UC18 ..> UC10 : provides input
+UC11 ..> UC10 : provides input
+UC10 ..> UC19 : generates
+UC19 ..> UC20 : leads to
+UC20 ..> UC21 : includes
+UC20 ..> UC22 : includes
+UC20 ..> UC23 : includes
+UC20 ..> UC24 : includes
+UC20 ..> UC25 : includes
+UC20 ..> UC26 : enables
+UC10 ..> UC30 : creates entry
+UC30 ..> UC31 : shows details
+UC30 ..> UC32 : allows
+UC30 ..> UC33 : allows
+UC27 ..> UC28 : shows details
+UC27 ..> UC29 : allows
+UC34 ..> UC35 : enables
+UC35 ..> UC36 : generates
+UC34 ..> UC37 : maintains
+UC35 ..> UC38 : supports
+
+note right of UC1
+  **Onboarding Flow:**
+  - Welcome screens
+  - Feature introduction
+  - App navigation guide
+end note
+
+note right of UC10
+  **Search Input Methods:**
+  - Direct text entry
+  - Voice recognition
+  - Image OCR
+  - Audio transcription
+end note
+
+note right of UC20
+  **Hadith Details Include:**
+  - Arabic text
+  - English translation
+  - Urdu translation
+  - Authenticity grade
+  - Narrator chain
+  - Book reference
+end note
+
+note right of UC34
+  **AI Chatbot Features:**
+  - Conversational interface
+  - Context-aware responses
+  - Hadith knowledge base
+  - Multi-turn conversations
+end note
+
+@enduml
+
+
+

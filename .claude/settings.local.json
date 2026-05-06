@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(netsh advfirewall firewall add rule name=\"Flask True Hadith Port 5000\" dir=in action=allow protocol=TCP localport=5000)"
+    ]
+  }
+}
