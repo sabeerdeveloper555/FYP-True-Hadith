@@ -49,6 +49,10 @@ app.*.map.json
 .env
 *.env
 
+# Firebase Admin SDK private key (never commit this)
+*firebase-adminsdk*.json
+firebase-service-account.json
+
 # Python virtual environment
 venv/
 __pycache__/

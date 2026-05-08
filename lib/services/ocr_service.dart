@@ -616,9 +616,9 @@ class OCRService {
           final easyOCRResult = await _extractWithEasyOCRWithDetails(imagePath,
                   languages: languages)
               .timeout(
-            const Duration(seconds: 60),
+            const Duration(seconds: 180),
             onTimeout: () {
-              return {'text': null, 'error': 'EasyOCR timeout'};
+              return {'text': null, 'error': 'EasyOCR timeout — backend is taking too long. Try again.'};
             },
           );
           easyOCRAttempted = true;
@@ -1134,9 +1134,9 @@ class OCRService {
         )
             .timeout(
           const Duration(
-              seconds: 60), // Reduced timeout to prevent app freezing
+              seconds: 150), // Allow time for slow CPU-based EasyOCR inference
           onTimeout: () {
-            print('OCR Debug: ⚠ EasyOCR API timeout after 60 seconds');
+            print('OCR Debug: ⚠ EasyOCR API timeout after 150 seconds');
             // Return timeout response instead of throwing
             return http.Response(
               jsonEncode({

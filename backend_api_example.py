@@ -30,6 +30,14 @@ except ImportError:
     RAPIDFUZZ_AVAILABLE = False
     print("Warning: rapidfuzz not installed. Fuzzy search will be limited. Install with: pip install rapidfuzz")
 
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging as fcm_messaging
+    FIREBASE_ADMIN_AVAILABLE = True
+except ImportError:
+    FIREBASE_ADMIN_AVAILABLE = False
+    print("Warning: firebase-admin not installed. Push notifications disabled. Install with: pip install firebase-admin")
+
 # Fix Unicode encoding for Windows console
 if sys.platform == 'win32':
     import codecs
@@ -93,6 +101,115 @@ def get_openai_client():
             print(f"Warning: Could not create OpenAI client with custom http_client: {e}")
             _openai_client = OpenAI(api_key=api_key)
     return _openai_client
+
+
+_firebase_app = None
+
+def get_firebase_app():
+    """Initialize Firebase Admin SDK once and reuse the app instance."""
+    global _firebase_app
+    if _firebase_app is not None:
+        return _firebase_app
+    if not FIREBASE_ADMIN_AVAILABLE:
+        return None
+
+    sa_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH', '')
+    if not sa_path or not os.path.exists(sa_path):
+        print(f"⚠ Firebase Admin: service account file not found at '{sa_path}'")
+        print("  Download it from Firebase Console → Project Settings → Service Accounts")
+        return None
+
+    try:
+        cred = credentials.Certificate(sa_path)
+        _firebase_app = firebase_admin.initialize_app(cred)
+        print("✓ Firebase Admin SDK initialized")
+        return _firebase_app
+    except Exception as e:
+        print(f"✗ Firebase Admin SDK init failed: {e}")
+        return None
+
+
+def send_push_notification(fcm_token, title, body, data=None):
+    """
+    Send a push notification to a single device.
+    Returns True on success, False on failure.
+    Runs synchronously — call from a background thread if inside a request handler.
+    """
+    if not get_firebase_app():
+        return False
+
+    try:
+        message = fcm_messaging.Message(
+            notification=fcm_messaging.Notification(title=title, body=body),
+            # data values must all be strings
+            data={str(k): str(v) for k, v in (data or {}).items()},
+            token=fcm_token,
+            android=fcm_messaging.AndroidConfig(
+                priority='high',
+                notification=fcm_messaging.AndroidNotification(
+                    channel_id='true_hadith_main',
+                    sound='default',
+                ),
+            ),
+            apns=fcm_messaging.APNSConfig(
+                payload=fcm_messaging.APNSPayload(
+                    aps=fcm_messaging.Aps(sound='default', badge=1)
+                )
+            ),
+        )
+        response = fcm_messaging.send(message)
+        print(f"✓ Push notification sent: {response}")
+        return True
+    except fcm_messaging.UnregisteredError:
+        # Token is stale — clear it so we don't keep sending to dead tokens
+        print(f"⚠ FCM token unregistered, clearing from DB: {fcm_token[:20]}...")
+        _clear_stale_fcm_token(fcm_token)
+        return False
+    except Exception as e:
+        print(f"✗ Push notification failed: {e}")
+        return False
+
+
+def _clear_stale_fcm_token(token):
+    """Remove an expired FCM token from the database."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET fcm_token = NULL WHERE fcm_token = %s", (token,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"✗ Could not clear stale FCM token: {e}")
+        if conn:
+            conn.close()
+
+
+def send_notification_to_user(user_id, title, body, data=None):
+    """
+    Look up a user's stored FCM token and send them a push notification.
+    Safe to call from a background thread.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT fcm_token FROM users WHERE user_id = %s", (user_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if not row or not row.get('fcm_token'):
+            print(f"⚠ No FCM token for user_id={user_id}, skipping notification")
+            return False
+
+        return send_push_notification(row['fcm_token'], title, body, data)
+    except Exception as e:
+        print(f"✗ send_notification_to_user error: {e}")
+        if conn:
+            conn.close()
+        return False
 
 
 def load_faiss_indexes():
@@ -754,6 +871,18 @@ def search_hadiths():
             })
 
         results.sort(key=lambda r: hadith_score_map.get(r['hadith_id'], 9999.0))
+
+        # Notify user of results (handy if they minimised the app during a slow search)
+        if user_id and results:
+            count = len(results)
+            threading.Thread(
+                target=send_notification_to_user,
+                args=(user_id, 'Search Complete',
+                      f'Found {count} hadith{"s" if count != 1 else ""} for "{query[:40]}"'),
+                kwargs={'data': {'type': 'search'}},
+                daemon=True
+            ).start()
+
         return jsonify({'results': results}), 200
 
     except Exception as e:
@@ -921,6 +1050,52 @@ def delete_profile_photo():
         if conn:
             conn.close()
         return jsonify({'message': f'Delete failed: {str(e)}'}), 500
+
+
+@app.route('/api/user/fcm-token', methods=['POST'])
+def register_fcm_token():
+    """
+    Store or refresh the FCM device token for push notifications.
+
+    Expected JSON body:
+    {
+        "user_id": int,
+        "fcm_token": "string"
+    }
+    """
+    conn = None
+    cursor = None
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'message': 'No data provided'}), 400
+
+        user_id = data.get('user_id')
+        fcm_token = data.get('fcm_token')
+
+        if not user_id or not fcm_token:
+            return jsonify({'message': 'Missing user_id or fcm_token'}), 400
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET fcm_token = %s WHERE user_id = %s",
+            (fcm_token, user_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({'message': 'FCM token registered'}), 200
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+        return jsonify({'message': f'Failed to register token: {str(e)}'}), 500
 
 
 @app.route('/api/health', methods=['GET'])
@@ -1532,12 +1707,12 @@ def easyocr_extract_text():
             
             ocr_thread = threading.Thread(target=run_ocr, daemon=True)
             ocr_thread.start()
-            ocr_thread.join(timeout=60.0)  # 60 second timeout
-            
+            ocr_thread.join(timeout=120.0)  # 120 second timeout (CPU EasyOCR can be slow)
+
             if ocr_thread.is_alive():
                 # Thread is still running - timeout occurred
                 return jsonify({
-                    'message': 'OCR processing timed out after 60 seconds',
+                    'message': 'OCR processing timed out after 120 seconds. The image may be too complex or the server is under load.',
                     'success': False
                 }), 408
             
@@ -3215,11 +3390,21 @@ The Arabic text, Urdu translation, and metadata (book, chapter, hadith number, n
         
         cursor.close()
         conn.close()
-        
+
         # Check total elapsed time
         total_elapsed = time.time() - request_start_time
         print(f"[RAG] Total request time: {total_elapsed:.2f} seconds")
-        
+
+        # Push notification — useful when the user minimises the app while the
+        # chatbot is thinking (requests can take up to 60 s).
+        preview = bot_reply[:80] + '…' if len(bot_reply) > 80 else bot_reply
+        threading.Thread(
+            target=send_notification_to_user,
+            args=(user_id, 'True Hadith AI replied', preview),
+            kwargs={'data': {'type': 'chat', 'conversation_id': str(conversation_id)}},
+            daemon=True
+        ).start()
+
         return _make_chat_response({
             'conversation_id': conversation_id,
             'reply': bot_reply
@@ -3280,6 +3465,9 @@ The Arabic text, Urdu translation, and metadata (book, chapter, hadith number, n
 print("\n" + "=" * 50)
 print("Initializing backend...")
 print("=" * 50)
+
+# Initialize Firebase Admin SDK for push notifications
+get_firebase_app()
 
 # Load FAISS indexes and mappings
 print("Loading FAISS indexes and mapping files...")

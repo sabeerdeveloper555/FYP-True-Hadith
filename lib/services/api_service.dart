@@ -1,11 +1,12 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/user_model.dart';
 import '../models/hadith_models.dart';
 
 class ApiService {
   // Update this with your Flask backend URL
-  static const String baseUrl = 'http://10.252.17.94:5000/api';
+  static const String baseUrl = 'http://192.168.100.12:5000/api';
   // Change to your backend URL
 
   // For Android emulator, use: http://10.0.2.2:5000/api
@@ -613,6 +614,26 @@ class ApiService {
         rethrow;
       }
       throw Exception('Network error: ${e.toString()}');
+    }
+  }
+
+  /// Register or refresh the FCM device token for push notifications.
+  /// Best-effort: failures are logged but not surfaced to the user.
+  static Future<void> registerFcmToken({
+    required int userId,
+    required String token,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/user/fcm-token'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'user_id': userId, 'fcm_token': token}),
+      );
+      if (response.statusCode != 200) {
+        debugPrint('FCM token registration failed (${response.statusCode})');
+      }
+    } catch (e) {
+      debugPrint('FCM token registration error: $e');
     }
   }
 
