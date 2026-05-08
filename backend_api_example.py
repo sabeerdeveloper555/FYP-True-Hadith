@@ -62,6 +62,7 @@ load_dotenv(override=True)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Flutter app
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB for audio uploads
 
 # Database configuration
 DB_CONFIG = {
@@ -1827,167 +1828,88 @@ def easyocr_extract_text():
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe_audio():
     """
-    Transcribe audio file using OpenAI Whisper API
-    
-    Expected JSON body:
-    {
-        "audio": "base64_encoded_audio_string",
-        "audio_format": "mp3" (or "wav", "m4a", etc.),
-        "start_seconds": 0.0 (optional, for trimming),
-        "end_seconds": 60.0 (optional, for trimming),
-        "language": "ur" (optional: "ur" for Urdu, "en" for English, "ar" for Arabic, or null for auto-detect)
-    }
-    
+    Transcribe audio file using OpenAI Whisper API.
+
+    Accepts multipart/form-data:
+      - audio    : the audio file (required)
+      - language : 'ur', 'en', or 'ar' (optional, omit for auto-detect)
+
     Returns:
     {
-        "transcript": "transcribed text from audio",
+        "transcript": "transcribed text",
         "success": true
     }
     """
+    import tempfile
+
     try:
-        data = request.get_json()
-        
-        if not data or 'audio' not in data:
+        if 'audio' not in request.files:
+            return jsonify({'message': 'Missing audio file in request', 'success': False}), 400
+
+        audio_file = request.files['audio']
+        language = request.form.get('language') or None
+
+        valid_languages = ['ur', 'en', 'ar']
+        if language and language not in valid_languages:
             return jsonify({
-                'message': 'Missing audio data in request',
+                'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
                 'success': False
             }), 400
-        
-        # Decode base64 audio
+
+        filename = audio_file.filename or 'audio.m4a'
+        dot = filename.rfind('.')
+        ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
+
+        print(f"🎤 Transcription request received (multipart):")
+        print(f"   - Filename: {filename}, Format: {ext}")
+        print(f"   - Language: {language if language else 'auto-detect'}")
+
+        # Save uploaded file to a temp path
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
+            audio_file.save(tmp.name)
+            temp_audio_path = tmp.name
+
         try:
-            audio_base64 = data['audio']
-            audio_format = data.get('audio_format', 'mp3')
-            start_seconds = data.get('start_seconds')
-            end_seconds = data.get('end_seconds')
-            language = data.get('language')  # 'ur', 'en', 'ar', or None for auto-detect
-            
-            # Validate language code if provided
-            valid_languages = ['ur', 'en', 'ar']
-            if language and language not in valid_languages:
-                return jsonify({
-                    'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
-                    'success': False
-                }), 400
-            
-            audio_bytes = base64.b64decode(audio_base64)
-            print(f"🎤 Transcription request received:")
-            print(f"   - Audio size: {len(audio_bytes)} bytes")
-            print(f"   - Format: {audio_format}")
-            print(f"   - Language parameter: {language if language else 'None (auto-detect)'}")
-            if language:
-                print(f"   - ⚠️ LANGUAGE RESTRICTED TO: {language.upper()}")
-            else:
-                print(f"   - ✅ Language: AUTO-DETECT (Whisper will detect automatically)")
-            # Note: Audio trimming is done client-side in Flutter
-            # Backend receives the already-trimmed audio file
-            if start_seconds is not None and end_seconds is not None:
-                print(f"   - ⚠️ Trim positions: {start_seconds}s to {end_seconds}s")
-                print(f"   - ⚠️ WARNING: Full audio file received (trimming not implemented)")
-                print(f"   - ⚠️ Whisper will transcribe the ENTIRE audio file, not just the trimmed segment")
-            
-            # Save audio to temporary file
-            import tempfile
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{audio_format}') as temp_file:
-                temp_file.write(audio_bytes)
-                temp_audio_path = temp_file.name
-            
-            # Audio is already trimmed client-side, use it directly
-            # No FFmpeg or pydub needed - trimming happens in Flutter app
-            final_audio_path = temp_audio_path
-            
-            try:
-                # Get OpenAI client
-                client = get_openai_client()
-                
-                # Open audio file for transcription (use trimmed file if available)
-                with open(final_audio_path, 'rb') as audio_file:
-                    # Call OpenAI Whisper API
-                    print(f"🔍 Sending audio to OpenAI Whisper API...")
-                    print(f"   - Using API key: {os.getenv('OPENAI_API_KEY', '')[:10]}... (first 10 chars)")
-                    
-                    try:
-                        # Map language codes to Whisper language codes
-                        whisper_language = None
-                        if language:
-                            # Whisper uses ISO 639-1 language codes
-                            # 'ur' for Urdu, 'en' for English, 'ar' for Arabic
-                            whisper_language = language
-                            print(f"   - Whisper language restriction: {whisper_language}")
-                        else:
-                            print(f"   - Whisper language: auto-detect (None)")
-                        
-                        transcript_response = client.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=audio_file,
-                            language=whisper_language,  # None for auto-detect, or specific language code
-                            response_format="text"  # Returns plain text string
-                        )
-                        
-                        # When response_format="text", the response is a string
-                        transcript_text = str(transcript_response).strip()
-                        
-                        if not transcript_text:
-                            return jsonify({
-                                'message': 'Empty transcript received from API',
-                                'success': False
-                            }), 500
-                        
-                        print(f"✅ Transcription successful: {len(transcript_text)} characters")
-                        
-                        return jsonify({
-                            'transcript': transcript_text,
-                            'success': True
-                        }), 200
-                    except Exception as whisper_error:
-                        error_msg = str(whisper_error)
-                        print(f"❌ Whisper API Error: {error_msg}")
-                        
-                        # Check if it's an authentication/API key issue
-                        if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
-                            return jsonify({
-                                'message': 'OpenAI API key issue. Please check your OPENAI_API_KEY in .env file. The same key should work for both embeddings and Whisper.',
-                                'success': False,
-                                'error': 'API_KEY_ERROR'
-                            }), 401
-                        elif 'insufficient_quota' in error_msg.lower() or 'quota' in error_msg.lower():
-                            return jsonify({
-                                'message': 'OpenAI API quota exceeded. Please check your account billing.',
-                                'success': False,
-                                'error': 'QUOTA_ERROR'
-                            }), 402
-                        else:
-                            return jsonify({
-                                'message': f'Whisper API error: {error_msg}',
-                                'success': False,
-                                'error': 'WHISPER_ERROR'
-                            }), 500
-                    
-            finally:
-                # Clean up temporary file
+            client = get_openai_client()
+
+            with open(temp_audio_path, 'rb') as f:
+                print(f"🔍 Sending audio to OpenAI Whisper API...")
                 try:
-                    if os.path.exists(temp_audio_path):
-                        os.unlink(temp_audio_path)
-                except Exception as e:
-                    print(f"Warning: Could not delete temp file: {e}")
-                    
-        except Exception as e:
-            print(f"❌ Error processing audio: {e}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            return jsonify({
-                'message': f'Error processing audio: {str(e)}',
-                'success': False
-            }), 400
-            
+                    transcript_response = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                        language=language,
+                        response_format="text",
+                    )
+
+                    transcript_text = str(transcript_response).strip()
+
+                    if not transcript_text:
+                        return jsonify({'message': 'Empty transcript received from API', 'success': False}), 500
+
+                    print(f"✅ Transcription successful: {len(transcript_text)} characters")
+                    return jsonify({'transcript': transcript_text, 'success': True}), 200
+
+                except Exception as whisper_error:
+                    error_msg = str(whisper_error)
+                    print(f"❌ Whisper API Error: {error_msg}")
+                    if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
+                        return jsonify({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'}), 401
+                    elif 'quota' in error_msg.lower():
+                        return jsonify({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'}), 402
+                    else:
+                        return jsonify({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'}), 500
+        finally:
+            try:
+                if os.path.exists(temp_audio_path):
+                    os.unlink(temp_audio_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp file: {e}")
+
     except Exception as e:
         import traceback
-        error_trace = traceback.format_exc()
-        print(f"❌ Transcription endpoint error: {error_trace}")
-        return jsonify({
-            'message': f'Transcription failed: {str(e)}',
-            'success': False,
-            'error_type': type(e).__name__
-        }), 500
+        print(f"❌ Transcription endpoint error: {traceback.format_exc()}")
+        return jsonify({'message': f'Transcription failed: {str(e)}', 'success': False, 'error_type': type(e).__name__}), 500
 
 
 def is_english_only(text):

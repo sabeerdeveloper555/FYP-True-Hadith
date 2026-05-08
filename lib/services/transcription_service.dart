@@ -7,14 +7,12 @@ import '../services/api_service.dart';
 
 /// Service for audio transcription
 class TranscriptionService {
-  /// Transcribe audio file using backend API
+  /// Transcribe audio file using backend API (multipart/form-data upload).
   ///
   /// [audioPath] - Path to the audio file (original or trimmed)
-  /// [startSeconds] - Start time of the segment to transcribe (optional, for trimmed audio)
-  /// [endSeconds] - End time of the segment to transcribe (optional, for trimmed audio)
-  /// [language] - Language code to restrict transcription: 'ur' for Urdu, 'en' for English, 'ar' for Arabic, or null for auto-detect
-  ///
-  /// Returns the transcribed text
+  /// [startSeconds] - Start time of the segment to transcribe (trims before upload)
+  /// [endSeconds] - End time of the segment to transcribe (trims before upload)
+  /// [language] - Language code: 'ur', 'en', 'ar', or null for auto-detect
   static Future<String> transcribeAudio({
     required String audioPath,
     double? startSeconds,
@@ -22,18 +20,16 @@ class TranscriptionService {
     String? language,
   }) async {
     try {
-      // Get base URL from ApiService
       String baseUrl = ApiService.baseUrl;
       if (baseUrl.endsWith('/api')) {
         baseUrl = baseUrl.substring(0, baseUrl.length - 4);
       }
 
-      // Trim audio client-side if start/end positions are provided and differ from full audio
+      // Trim audio client-side when a non-zero start is requested
       String finalAudioPath = audioPath;
       if (startSeconds != null && endSeconds != null && startSeconds > 0) {
         try {
-          print(
-              '✂️ Trimming audio client-side: ${startSeconds}s to ${endSeconds}s');
+          print('✂️ Trimming audio: ${startSeconds}s to ${endSeconds}s');
           final trimmedPath = await _trimAudioClientSide(
             audioPath: audioPath,
             startSeconds: startSeconds,
@@ -48,20 +44,39 @@ class TranscriptionService {
         } catch (e) {
           print('⚠️ Error trimming audio: $e, using full audio');
         }
-      } else {
-        print('📝 Using full audio (no trimming requested)');
       }
 
-      // Read audio file (trimmed or original)
       final audioFile = File(finalAudioPath);
       if (!await audioFile.exists()) {
         throw Exception('Audio file not found: $finalAudioPath');
       }
 
-      final audioBytes = await audioFile.readAsBytes();
-      final audioBase64 = base64Encode(audioBytes);
+      final fileName = finalAudioPath.split(RegExp(r'[/\\]')).last;
+      final dotIndex = fileName.lastIndexOf('.');
+      final extension = (dotIndex >= 0 && dotIndex < fileName.length - 1)
+          ? fileName.substring(dotIndex + 1).toLowerCase()
+          : 'm4a';
 
-      // Clean up trimmed file if it was created
+      final fileSize = await audioFile.length();
+      print('🎤 Sending audio for transcription (multipart)...');
+      print('   - File size: $fileSize bytes');
+      print('   - Format: $extension');
+      print('   - Language: ${language ?? "auto-detect"}');
+
+      // Build multipart request — no base64 encoding, streams the file directly
+      final uri = Uri.parse('$baseUrl/api/transcribe');
+      final request = http.MultipartRequest('POST', uri);
+
+      request.files.add(await http.MultipartFile.fromPath(
+        'audio',
+        finalAudioPath,
+        filename: 'audio.$extension',
+      ));
+      if (language != null) {
+        request.fields['language'] = language;
+      }
+
+      // Clean up trimmed temp file after adding to request
       if (finalAudioPath != audioPath) {
         try {
           await audioFile.delete();
@@ -70,72 +85,31 @@ class TranscriptionService {
         }
       }
 
-      // Get file extension safely (handle filenames without extensions)
-      final fileName = finalAudioPath.split(RegExp(r'[/\\]')).last;
-      final dotIndex = fileName.lastIndexOf('.');
-      final extension = (dotIndex >= 0 && dotIndex < fileName.length - 1)
-          ? fileName.substring(dotIndex + 1).toLowerCase()
-          : 'm4a';
-
-      // Prepare request body (don't send trim positions since audio is already trimmed)
-      final requestBody = {
-        'audio': audioBase64,
-        'audio_format': extension,
-        if (language != null) 'language': language,
-      };
-
-      print('🎤 Sending audio for transcription...');
-      print('   - Audio size: ${audioBytes.length} bytes');
-      print('   - Format: $extension');
-      print('   - Language parameter: ${language ?? "null (auto-detect)"}');
-      if (language != null) {
-        print('   - ⚠️ Language RESTRICTED to: $language');
-      } else {
-        print(
-            '   - ✅ Language: AUTO-DETECT (Whisper will detect automatically)');
-      }
-      if (startSeconds != null && endSeconds != null) {
-        print(
-            '   - ⚠️ Trim positions: ${startSeconds}s to ${endSeconds}s (but full audio sent - trimming not implemented)');
-      }
-
-      // Send request to backend
-      final response = await http
-          .post(
-        Uri.parse('$baseUrl/api/transcribe'),
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode(requestBody),
-      )
-          .timeout(
-        const Duration(seconds: 120), // 2 minutes timeout for transcription
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 300),
         onTimeout: () {
           throw Exception('Transcription request timed out');
         },
       );
 
-      print('📝 Transcription response status: ${response.statusCode}');
+      final responseBody = await streamedResponse.stream.bytesToString();
+      print('📝 Transcription response status: ${streamedResponse.statusCode}');
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
+      if (streamedResponse.statusCode == 200) {
+        final data = jsonDecode(responseBody);
         final transcript = data['transcript'] as String? ?? '';
-
         if (transcript.isEmpty) {
           throw Exception('Empty transcript received from server');
         }
-
         print('✅ Transcription successful: ${transcript.length} characters');
         return transcript.trim();
       } else {
-        final error = jsonDecode(response.body);
+        final error = jsonDecode(responseBody);
         throw Exception(error['message'] ?? 'Transcription failed');
       }
     } catch (e) {
       print('❌ Transcription error: $e');
-      if (e is Exception) {
-        rethrow;
-      }
+      if (e is Exception) rethrow;
       throw Exception('Transcription failed: ${e.toString()}');
     }
   }
