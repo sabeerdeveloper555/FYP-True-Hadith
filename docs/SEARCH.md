@@ -1,3 +1,4 @@
+
 # Hadith Search — How It Works
 
 This document explains the end-to-end search pipeline in True Hadith, from the moment a user submits a query to the ranked list of results displayed on screen.
