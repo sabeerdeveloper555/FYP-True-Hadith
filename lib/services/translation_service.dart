@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/config.dart';
+
 enum TranslationLanguage {
   none,
   bengali,
@@ -76,32 +78,38 @@ class TranslationService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Uses MyMemory API (free, no API key required).
   Future<String> translate(String text) async {
     final code = _selectedLanguage.code;
     if (code.isEmpty || text.trim().isEmpty) return text;
 
     final uri = Uri.parse(
-      'https://api.mymemory.translated.net/get'
-      '?q=${Uri.encodeComponent(text)}&langpair=en|$code',
+      'https://translation.googleapis.com/language/translate/v2'
+      '?key=${AppConfig.googleTranslateApiKey}',
     );
 
     final response = await http
-        .get(uri)
+        .post(
+          uri,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'q': text,
+            'source': 'en',
+            'target': code,
+            'format': 'text',
+          }),
+        )
         .timeout(const Duration(seconds: 15));
 
     if (response.statusCode != 200) {
-      throw Exception('Translation failed: HTTP ${response.statusCode}');
+      final err = jsonDecode(response.body);
+      final msg = err['error']?['message'] ?? 'HTTP ${response.statusCode}';
+      throw Exception('Translation failed: $msg');
     }
 
     final body = jsonDecode(response.body) as Map<String, dynamic>;
-    final status = body['responseStatus'];
-    if (status != 200) {
-      final details = body['responseDetails'] ?? 'Unknown error';
-      throw Exception('Translation failed: $details');
-    }
+    final translated = (body['data']?['translations'] as List?)
+        ?.firstOrNull?['translatedText'] as String?;
 
-    final translated = body['responseData']?['translatedText'] as String?;
     if (translated == null || translated.isEmpty) {
       throw Exception('Translation failed: empty response');
     }

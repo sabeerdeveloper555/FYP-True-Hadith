@@ -49,6 +49,9 @@ app.*.map.json
 .env
 *.env
 
+# API keys / secrets
+lib/core/config.dart
+
 # Firebase Admin SDK private key (never commit this)
 *firebase-adminsdk*.json
 firebase-service-account.json
