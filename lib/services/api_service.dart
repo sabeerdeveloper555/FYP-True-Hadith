@@ -345,6 +345,7 @@ class ApiService {
                     hadithNumber: item['hadith_number'].toString(),
                     chapterNumber: item['chapter_number'].toString(),
                     grade: item['grade'] as String? ?? 'No grade mention',
+                    similarityScore: (item['similarity_score'] as num?)?.toDouble(),
                   ))
               .toList();
         } catch (e) {

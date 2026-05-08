@@ -30,6 +30,14 @@ except ImportError:
     RAPIDFUZZ_AVAILABLE = False
     print("Warning: rapidfuzz not installed. Fuzzy search will be limited. Install with: pip install rapidfuzz")
 
+# Try to import rank_bm25 for keyword-based search
+try:
+    from rank_bm25 import BM25Okapi
+    BM25_AVAILABLE = True
+except ImportError:
+    BM25_AVAILABLE = False
+    print("Warning: rank_bm25 not installed. BM25 hybrid search disabled. Install with: pip install rank-bm25")
+
 try:
     import firebase_admin
     from firebase_admin import credentials, messaging as fcm_messaging
@@ -79,6 +87,10 @@ muslim_index = None
 bukhari_mapping = None
 tirmizi_mapping = None
 muslim_mapping = None
+
+# BM25 index globals (built from DB at startup)
+bm25_index = None          # BM25Okapi instance
+bm25_hadith_ids = []       # ordered list of hadith_ids matching bm25_index rows
 
 # OpenAI Client - initialized lazily to avoid version conflicts
 _openai_client = None
@@ -265,6 +277,28 @@ def load_mapping_csvs():
             print(f"⚠ Warning: Sahih Muslim mapping CSV not found at {MUSLIM_MAPPING_PATH}")
     except Exception as e:
         print(f"✗ Error loading mapping CSVs: {e}")
+
+
+def build_bm25_index():
+    """Build a BM25 index over all hadith English text at startup for hybrid search."""
+    global bm25_index, bm25_hadith_ids
+    if not BM25_AVAILABLE:
+        print("⚠ BM25 not available — skipping index build")
+        return
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT hadith_id, hadith_english FROM hadiths ORDER BY hadith_id")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        bm25_hadith_ids = [row[0] for row in rows]
+        tokenized = [str(row[1] or '').lower().split() for row in rows]
+        bm25_index = BM25Okapi(tokenized)
+        print(f"✓ BM25 index built: {len(bm25_hadith_ids)} hadiths indexed")
+    except Exception as e:
+        print(f"✗ Error building BM25 index: {e}")
 
 
 def get_db_connection():
@@ -702,115 +736,85 @@ def search_hadiths():
             return jsonify({'message': 'Query cannot be empty'}), 400
 
         # ===== HYBRID SEARCH: Semantic + Fuzzy =====
-        # Maps hadith_id -> relevance_score (lower = more relevant)
-        hadith_score_map = {}
+        # Maps hadith_id -> raw FAISS relevance score (lower = more relevant for L2,
+        # higher = more relevant for inner product — normalised later)
+        faiss_raw_scores = {}   # per-index raw scores before normalisation
+        hadith_score_map = {}   # final merged, normalised FAISS score (lower = better)
         semantic_count = 0
+        k = 20  # Increased from 10 → richer candidate pool per index
 
-        # 1. SEMANTIC SEARCH (FAISS) - for meaning-based matching
+        # Helper: collect scores from one FAISS index into a per-index dict,
+        # then min-max normalise and merge into hadith_score_map.
+        def _collect_faiss_scores(index, mapping, label):
+            nonlocal semantic_count
+            if index is None or mapping is None:
+                return
+            if embedding_dim != index.d:
+                print(f"[Search] {label}: embedding dim mismatch ({embedding_dim} vs {index.d}), skipping")
+                return
+
+            distances, indices = index.search(query_vector, k)
+            metric = index.metric_type
+            raw = {}  # idx -> raw distance
+
+            for idx, dist in zip(indices[0], distances[0]):
+                if idx < 0:
+                    continue
+                hadith_id = None
+                if 'faiss_index' in mapping.columns:
+                    matched = mapping[mapping['faiss_index'] == idx]
+                    if not matched.empty:
+                        hadith_id = int(matched.iloc[0]['hadith_id'])
+                else:
+                    if idx < len(mapping):
+                        hadith_id = int(mapping.iloc[idx]['hadith_id'])
+                if hadith_id is not None:
+                    # For inner product: higher = better → negate so lower = better
+                    score = -float(dist) if metric == faiss.METRIC_INNER_PRODUCT else float(dist)
+                    raw[hadith_id] = score
+                    semantic_count += 1
+
+            if not raw:
+                return
+
+            # Min-max normalise this index's scores to [0, 1] before merging
+            scores = list(raw.values())
+            s_min, s_max = min(scores), max(scores)
+            s_range = s_max - s_min if s_max != s_min else 1.0
+            for hid, sc in raw.items():
+                norm = (sc - s_min) / s_range  # 0 = best, 1 = worst
+                # Keep the best (lowest) normalised score if the hadith appears in multiple indexes
+                if hid not in hadith_score_map or norm < hadith_score_map[hid]:
+                    hadith_score_map[hid] = norm
+
+            print(f"[Search] {label}: {len(raw)} results (k={k})")
+
+        # 1. SEMANTIC SEARCH (FAISS)
         try:
             query_embedding = get_embedding(cleaned_query)
-            
-            # Reshape for FAISS (needs 2D array)
             query_vector = query_embedding.reshape(1, -1)
             embedding_dim = query_embedding.shape[0]
             print(f"[Search] Query embedding dimension: {embedding_dim}")
 
-            # Search Bukhari
-            if bukhari_index is not None and bukhari_mapping is not None:
-                index_dim = bukhari_index.d
-                if embedding_dim == index_dim:
-                    k = 10  # Top 10 results
-                    distances, indices = bukhari_index.search(query_vector, k)
-                    print(f"[Search] Bukhari semantic search: found {len([i for i in indices[0] if i >= 0])} results")
-
-                    b_metric = bukhari_index.metric_type
-                    for rank, (idx, dist) in enumerate(zip(indices[0], distances[0])):
-                        if idx < 0:
-                            continue
-                        hadith_id = None
-                        if 'faiss_index' in bukhari_mapping.columns:
-                            matched_rows = bukhari_mapping[bukhari_mapping['faiss_index'] == idx]
-                            if not matched_rows.empty:
-                                hadith_id = int(matched_rows.iloc[0]['hadith_id'])
-                        else:
-                            if idx < len(bukhari_mapping):
-                                hadith_id = int(bukhari_mapping.iloc[idx]['hadith_id'])
-                        if hadith_id is not None:
-                            score = -float(dist) if b_metric == faiss.METRIC_INNER_PRODUCT else float(dist)
-                            if hadith_id not in hadith_score_map or score < hadith_score_map[hadith_id]:
-                                hadith_score_map[hadith_id] = score
-                            semantic_count += 1
-
-            # Search Tirmizi
-            if tirmizi_index is not None and tirmizi_mapping is not None:
-                index_dim = tirmizi_index.d
-                if embedding_dim == index_dim:
-                    k = 10  # Top 10 results
-                    distances, indices = tirmizi_index.search(query_vector, k)
-                    print(f"[Search] Tirmizi semantic search: found {len([i for i in indices[0] if i >= 0])} results")
-
-                    t_metric = tirmizi_index.metric_type
-                    for rank, (idx, dist) in enumerate(zip(indices[0], distances[0])):
-                        if idx < 0:
-                            continue
-                        hadith_id = None
-                        if 'faiss_index' in tirmizi_mapping.columns:
-                            matched_rows = tirmizi_mapping[tirmizi_mapping['faiss_index'] == idx]
-                            if not matched_rows.empty:
-                                hadith_id = int(matched_rows.iloc[0]['hadith_id'])
-                        else:
-                            if idx < len(tirmizi_mapping):
-                                hadith_id = int(tirmizi_mapping.iloc[idx]['hadith_id'])
-                        if hadith_id is not None:
-                            score = -float(dist) if t_metric == faiss.METRIC_INNER_PRODUCT else float(dist)
-                            if hadith_id not in hadith_score_map or score < hadith_score_map[hadith_id]:
-                                hadith_score_map[hadith_id] = score
-                            semantic_count += 1
-
-            # Search Sahih Muslim
-            if muslim_index is not None and muslim_mapping is not None:
-                index_dim = muslim_index.d
-                if embedding_dim == index_dim:
-                    k = 10  # Top 10 results
-                    distances, indices = muslim_index.search(query_vector, k)
-                    print(f"[Search] Sahih Muslim semantic search: found {len([i for i in indices[0] if i >= 0])} results")
-
-                    m_metric = muslim_index.metric_type
-                    for rank, (idx, dist) in enumerate(zip(indices[0], distances[0])):
-                        if idx < 0:
-                            continue
-                        hadith_id = None
-                        if 'faiss_index' in muslim_mapping.columns:
-                            matched_rows = muslim_mapping[muslim_mapping['faiss_index'] == idx]
-                            if not matched_rows.empty:
-                                hadith_id = int(matched_rows.iloc[0]['hadith_id'])
-                        else:
-                            if idx < len(muslim_mapping):
-                                hadith_id = int(muslim_mapping.iloc[idx]['hadith_id'])
-                        if hadith_id is not None:
-                            score = -float(dist) if m_metric == faiss.METRIC_INNER_PRODUCT else float(dist)
-                            if hadith_id not in hadith_score_map or score < hadith_score_map[hadith_id]:
-                                hadith_score_map[hadith_id] = score
-                            semantic_count += 1
+            _collect_faiss_scores(bukhari_index, bukhari_mapping, "Bukhari")
+            _collect_faiss_scores(tirmizi_index, tirmizi_mapping, "Tirmizi")
+            _collect_faiss_scores(muslim_index, muslim_mapping, "Sahih Muslim")
         except Exception as e:
-            error_msg = str(e)
-            print(f"[Search] Semantic search failed: {error_msg}")
-            # Continue with fuzzy search even if semantic search fails
+            print(f"[Search] Semantic search failed: {e}")
 
-        # 2. FUZZY SEARCH - fallback when semantic yields few results
-        if semantic_count < 3:
-            print(f"[Search] Semantic search found {semantic_count} results. Starting fuzzy search for query: '{query}'")
-            fuzzy_results = fuzzy_search_hadiths(query, limit=15, min_similarity=60)
-            print(f"[Search] Fuzzy search found {len(fuzzy_results)} results")
-
-            for result in fuzzy_results:
-                hadith_id = result[0]
-                similarity_score = float(result[1]) if len(result) >= 2 else 0.0
-                if hadith_id not in hadith_score_map:
-                    # Fuzzy results always rank after semantic; higher similarity = better
-                    hadith_score_map[hadith_id] = 10000.0 - similarity_score
-        else:
-            print(f"[Search] Semantic search found {semantic_count} results. Skipping fuzzy search to improve response time.")
+        # 2. FUZZY SEARCH - always run in parallel with semantic (blended below)
+        fuzzy_score_map = {}  # hadith_id -> fuzzy similarity 0-100 (higher = better)
+        print(f"[Search] Running fuzzy search in parallel (semantic found {semantic_count})")
+        fuzzy_results = fuzzy_search_hadiths(query, limit=15, min_similarity=60)
+        print(f"[Search] Fuzzy search found {len(fuzzy_results)} results")
+        for result in fuzzy_results:
+            hid = result[0]
+            sim = float(result[1]) if len(result) >= 2 else 0.0
+            fuzzy_score_map[hid] = sim
+            # Add to candidate pool if not already found by FAISS
+            if hid not in hadith_score_map:
+                # Place at end of FAISS range (score=1) so FAISS candidates rank first
+                hadith_score_map[hid] = 1.0
 
         print(f"[Search] Total unique hadiths found: {len(hadith_score_map)}")
 
@@ -859,7 +863,7 @@ def search_hadiths():
         cursor.close()
         conn.close()
 
-        # Format results and sort by relevance (best match first)
+        # Format results (include similarity_score for Flutter UI)
         results = []
         for h in hadiths:
             results.append({
@@ -867,10 +871,49 @@ def search_hadiths():
                 'book_name': h['book_name_english'],
                 'hadith_number': h['hadith_number'],
                 'chapter_number': h['chapter_number'],
-                'grade': h['grade_type'] or 'No grade mention'
+                'grade': h['grade_type'] or 'No grade mention',
+                'similarity_score': round(1.0 - hadith_score_map.get(h['hadith_id'], 1.0), 4),
             })
 
-        results.sort(key=lambda r: hadith_score_map.get(r['hadith_id'], 9999.0))
+        # ===== FINAL RANKING: FAISS (normalised) + BM25 + Fuzzy + Grade boost =====
+        # All signals are normalised to [0, 1] where lower final score = better rank.
+
+        # Grade boost: Sahih hadiths get a head-start, weak ones are pushed down
+        GRADE_BOOST = {'Sahih': -0.10, 'Hasan': -0.05, 'Da\'if': 0.05}
+
+        # BM25 keyword scores (higher = better match for short queries)
+        bm25_score_map = {}
+        if BM25_AVAILABLE and bm25_index is not None and bm25_hadith_ids:
+            try:
+                bm25_query_tokens = cleaned_query.lower().split()
+                raw_bm25 = bm25_index.get_scores(bm25_query_tokens)
+                bm25_max = float(raw_bm25.max()) if raw_bm25.max() > 0 else 1.0
+                for idx, hid in enumerate(bm25_hadith_ids):
+                    if hid in hadith_score_map:
+                        bm25_score_map[hid] = float(raw_bm25[idx]) / bm25_max
+                print(f"[Search] BM25 scored {len(bm25_score_map)} hadiths")
+            except Exception as bm25_err:
+                print(f"[Search] BM25 scoring failed: {bm25_err}")
+
+        # Fuzzy scores normalised to [0, 1] (higher = better)
+        fuzzy_max = max(fuzzy_score_map.values(), default=1.0)
+        fuzzy_norm_map = {hid: sc / fuzzy_max for hid, sc in fuzzy_score_map.items()}
+
+        def final_score(r):
+            hid = r['hadith_id']
+            faiss_norm  = hadith_score_map.get(hid, 1.0)          # [0,1] lower=better
+            bm25_norm   = bm25_score_map.get(hid, 0.0)            # [0,1] higher=better
+            fuzzy_norm  = fuzzy_norm_map.get(hid, 0.0)            # [0,1] higher=better
+            grade_delta = GRADE_BOOST.get(r['grade'], 0.0)
+            # Weights: FAISS 50%, BM25 30%, Fuzzy 20% — convert BM25/Fuzzy to lower=better
+            score = (0.50 * faiss_norm
+                     + 0.30 * (1.0 - bm25_norm)
+                     + 0.20 * (1.0 - fuzzy_norm)
+                     + grade_delta)
+            return score
+
+        results.sort(key=final_score)
+        print(f"[Search] Final ranking applied: FAISS+BM25+Fuzzy+GradeBoost")
 
         # Notify user of results (handy if they minimised the app during a slow search)
         if user_id and results:
@@ -3473,6 +3516,10 @@ get_firebase_app()
 print("Loading FAISS indexes and mapping files...")
 load_faiss_indexes()
 load_mapping_csvs()
+
+# Build BM25 keyword index
+print("Building BM25 keyword index...")
+build_bm25_index()
 
 # Initialize EasyOCR Readers ONCE at startup (CRITICAL PERFORMANCE FIX)
 # This eliminates the 60-90 second delay on every request

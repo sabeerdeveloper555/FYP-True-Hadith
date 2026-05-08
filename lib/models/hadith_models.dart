@@ -9,6 +9,7 @@ class HadithSummary {
   final String hadithNumber;
   final String chapterNumber;
   final String grade;
+  final double? similarityScore;
 
   HadithSummary({
     required this.hadithId,
@@ -16,6 +17,7 @@ class HadithSummary {
     required this.hadithNumber,
     required this.chapterNumber,
     required this.grade,
+    this.similarityScore,
   });
 }
 
