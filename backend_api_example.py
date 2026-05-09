@@ -742,7 +742,7 @@ def search_hadiths():
         faiss_raw_scores = {}   # per-index raw scores before normalisation
         hadith_score_map = {}   # final merged, normalised FAISS score (lower = better)
         semantic_count = 0
-        k = 20  # Increased from 10 → richer candidate pool per index
+        k = 30  # Increased from 20 → richer candidate pool per index
 
         # Helper: collect scores from one FAISS index into a per-index dict,
         # then min-max normalise and merge into hadith_score_map.
@@ -806,7 +806,7 @@ def search_hadiths():
         # 2. FUZZY SEARCH - always run in parallel with semantic (blended below)
         fuzzy_score_map = {}  # hadith_id -> fuzzy similarity 0-100 (higher = better)
         print(f"[Search] Running fuzzy search in parallel (semantic found {semantic_count})")
-        fuzzy_results = fuzzy_search_hadiths(query, limit=15, min_similarity=60)
+        fuzzy_results = fuzzy_search_hadiths(query, limit=15, min_similarity=75)
         print(f"[Search] Fuzzy search found {len(fuzzy_results)} results")
         for result in fuzzy_results:
             hid = result[0]
@@ -880,7 +880,7 @@ def search_hadiths():
         # All signals are normalised to [0, 1] where lower final score = better rank.
 
         # Grade boost: Sahih hadiths get a head-start, weak ones are pushed down
-        GRADE_BOOST = {'Sahih': -0.10, 'Hasan': -0.05, 'Da\'if': 0.05}
+        GRADE_BOOST = {'Sahih': -0.20, 'Hasan': -0.10, 'Da\'if': 0.15}
 
         # BM25 keyword scores (higher = better match for short queries)
         bm25_score_map = {}
@@ -906,10 +906,10 @@ def search_hadiths():
             bm25_norm   = bm25_score_map.get(hid, 0.0)            # [0,1] higher=better
             fuzzy_norm  = fuzzy_norm_map.get(hid, 0.0)            # [0,1] higher=better
             grade_delta = GRADE_BOOST.get(r['grade'], 0.0)
-            # Weights: FAISS 50%, BM25 30%, Fuzzy 20% — convert BM25/Fuzzy to lower=better
-            score = (0.50 * faiss_norm
+            # Weights: FAISS 60%, BM25 30%, Fuzzy 10% — convert BM25/Fuzzy to lower=better
+            score = (0.60 * faiss_norm
                      + 0.30 * (1.0 - bm25_norm)
-                     + 0.20 * (1.0 - fuzzy_norm)
+                     + 0.10 * (1.0 - fuzzy_norm)
                      + grade_delta)
             return score
 
