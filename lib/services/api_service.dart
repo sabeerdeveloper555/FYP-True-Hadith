@@ -673,7 +673,10 @@ class ApiService {
           final data = jsonDecode(response.body);
           return {
             'conversation_id': data['conversation_id'] as int,
-            'reply': data['reply'] as String,
+            'reply': data['reply'] as String? ?? '',
+            'explanation_title': data['explanation_title'] as String? ?? '',
+            'explanation_body': data['explanation_body'] as String? ?? '',
+            'hadiths': data['hadiths'] as List<dynamic>? ?? [],
           };
         } else {
           try {
