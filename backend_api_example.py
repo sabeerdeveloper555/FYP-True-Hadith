@@ -1913,15 +1913,59 @@ def transcribe_audio():
 
 
 def is_english_only(text):
-    """Check if text contains only English characters"""
-    # Remove whitespace and common punctuation
-    cleaned = re.sub(r'[^\w\s]', '', text)
-    # Check if all characters are ASCII (English)
-    try:
-        cleaned.encode('ascii')
+    """Reject only if the ENTIRE query is non-Latin script (Arabic, Urdu, CJK, etc.).
+    Accepts English text that contains Arabic loanwords written in Latin letters
+    (e.g. 'What is Zakat?', 'Tell me about Salah')."""
+    # Strip spaces, digits, and punctuation — look only at word characters
+    cleaned = re.sub(r'[\s\d\W]', '', text)
+    if not cleaned:
         return True
-    except UnicodeEncodeError:
-        return False
+    # Accept if at least one Latin letter is present
+    return any('a' <= c.lower() <= 'z' for c in cleaned)
+
+
+def detect_language_from_text(text):
+    """Detect language from Unicode character ranges.
+    Returns 'ar' for Arabic, 'ur' for Urdu (Nastaliq), 'en' for English/Latin."""
+    arabic_count = sum(1 for c in text if '؀' <= c <= 'ۿ' or 'ݐ' <= c <= 'ݿ')
+    latin_count = sum(1 for c in text if 'a' <= c.lower() <= 'z')
+
+    if arabic_count == 0 and latin_count == 0:
+        return 'en'
+    if arabic_count <= latin_count:
+        return 'en'
+
+    # Distinguish Urdu from Arabic by Urdu-specific characters:
+    # ں (U+06BA) noon ghunna — appears in کریں، ہیں، ہوں (very common)
+    # ہ (U+06C1) he goal — common Urdu form of ه
+    # ھ (U+06BE) do chashmi he — common in Urdu (بھ، پھ، تھ)
+    # ے (U+06D2) ye barree — sentence-final ye in Urdu
+    # ٹ (U+0679), ڈ (U+0688), ڑ (U+0691), ژ (U+0698), ۓ (U+06D3)
+    urdu_chars = set('ںہھےٹڈڑژۓ')
+    urdu_specific = sum(1 for c in text if c in urdu_chars)
+    return 'ur' if urdu_specific > 0 else 'ar'
+
+
+def translate_to_english_for_embedding(text):
+    """Translate Arabic/Urdu question to English for FAISS embedding search.
+    Falls back to original text if translation fails."""
+    try:
+        client = get_openai_client()
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "Translate the following question to English. Output ONLY the English translation, nothing else."},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=200,
+            temperature=0
+        )
+        translated = response.choices[0].message.content.strip()
+        print(f"[Chat] Translated question for embedding: {translated}")
+        return translated
+    except Exception as e:
+        print(f"[Chat] Translation for embedding failed: {e}. Using original text.")
+        return text
 
 
 def generate_gpt4o_response(system_prompt, user_prompt, timeout=60):
@@ -1944,8 +1988,8 @@ def generate_gpt4o_response(system_prompt, user_prompt, timeout=60):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.0,
-            max_tokens=1000,
+            temperature=0.2,
+            max_tokens=2000,
             timeout=timeout  # Add timeout parameter
         )
         
@@ -2424,18 +2468,31 @@ def chat():
             return jsonify({'message': 'Missing question'}), 400
         
         question = question.strip()
-        
-        # Validate English only
-        if not is_english_only(question):
-            return _make_chat_response({
-                'conversation_id': conversation_id or 0,
-                'reply': 'Only English questions are allowed.'
-            })
-        
+
+        # Detect language from the question text
+        requested_language = data.get('language') or detect_language_from_text(question)
+        print(f"[Chat] Detected/requested language: {requested_language}")
+
+        # For non-English questions, translate to English for FAISS embedding
+        embedding_question = question
+        if requested_language in ('ar', 'ur'):
+            embedding_question = translate_to_english_for_embedding(question)
+
         # Connect to database
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
+
+        # Ensure hadith_id column exists on messages BEFORE any query that touches it.
+        # This must run first so the SELECT/INSERT below don't fail on a missing column.
+        try:
+            cursor.execute(
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS hadith_id INTEGER NULL"
+            )
+            conn.commit()
+        except Exception as _e:
+            conn.rollback()
+            print(f"[Chat] hadith_id column ensure: {_e}")
+
         # Ensure user_type table has required values (1 = User, 2 = Bot)
         # This prevents foreign key constraint violations
         try:
@@ -2589,89 +2646,37 @@ def chat():
                     raise Exception(f"Database constraint error: {error_msg}. Please ensure user_type table exists with id=1 and id=2.")
             raise
         
-        # Check if this is a follow-up question that should use previous hadith
-        is_followup_question = False
-        previous_hadith_id = None
-        
-        # Detect follow-up questions (questions that ask for more explanation about previous hadith)
-        followup_keywords = [
-            'explain more', 'explain it more', 'tell me more', 'what does it mean',
-            'can you explain', 'explain further', 'more details', 'elaborate',
-            'what is the meaning', 'clarify', 'can you clarify', 'more explanation'
-        ]
-        
-        question_lower = question.lower().strip()
-        is_followup_question = any(keyword in question_lower for keyword in followup_keywords)
-        
-        # If it's a follow-up question and we have a conversation, try to get the last hadith from previous messages
-        previous_hadith_data = None
-        if is_followup_question and conversation_id:
-            print(f"[RAG] Detected follow-up question: '{question}'")
-            # Get the last bot message from this conversation that contains a hadith
-            cursor.execute("""
-                SELECT message_text
-                FROM messages
-                WHERE FK_conversation_id = %s 
-                  AND FK_user_type_id = 2
-                  AND message_text LIKE '%%🔹Arabic:%%'
-                ORDER BY created_at DESC
-                LIMIT 1
-            """, (conversation_id,))
-            
-            last_bot_message = cursor.fetchone()
-            if last_bot_message:
-                # Extract hadith text from the previous message
-                previous_message = last_bot_message['message_text']
-                print(f"[RAG] Found previous bot message with hadith, extracting hadith data")
-                
-                # Try to extract hadith fields from the previous message
-                try:
-                    # Extract Arabic text
-                    arabic_match = re.search(r'🔹Arabic:\s*(.*?)(?=\n🔹English:)', previous_message, re.DOTALL)
-                    english_match = re.search(r'🔹English:\s*(.*?)(?=\n🔹Urdu:)', previous_message, re.DOTALL)
-                    urdu_match = re.search(r'🔹Urdu:\s*(.*?)(?=\n🔹Book:)', previous_message, re.DOTALL)
-                    book_match = re.search(r'🔹Book:\s*(.*?)(?=\n🔹Chapter:)', previous_message, re.DOTALL)
-                    chapter_match = re.search(r'🔹Chapter:\s*(.*?)(?=\n🔹Hadith Number:)', previous_message, re.DOTALL)
-                    hadith_num_match = re.search(r'🔹Hadith Number:\s*(.*?)(?=\n🔹Narrator:)', previous_message, re.DOTALL)
-                    narrator_match = re.search(r'🔹Narrator:\s*(.*?)(?=\n🔹Grade:)', previous_message, re.DOTALL)
-                    grade_match = re.search(r'🔹Grade:\s*(.*?)(?=\n✅)', previous_message, re.DOTALL)
-                    
-                    if english_match:  # At least need English text
-                        # Parse chapter info (format: "number chapter_name")
-                        chapter_info = chapter_match.group(1).strip() if chapter_match else 'N/A N/A'
-                        chapter_parts = chapter_info.split(' ', 1) if chapter_info != 'N/A' else ['N/A', 'N/A']
-                        chapter_number = chapter_parts[0] if len(chapter_parts) > 0 else 'N/A'
-                        chapter_title_english = chapter_parts[1] if len(chapter_parts) > 1 else 'N/A'
-                        
-                        previous_hadith_data = {
-                            'hadith_id': None,  # We don't have the ID from previous message
-                            'hadith_arabic': arabic_match.group(1).strip() if arabic_match else 'N/A',
-                            'hadith_english': english_match.group(1).strip(),
-                            'hadith_urdu': urdu_match.group(1).strip() if urdu_match else 'N/A',
-                            'book_name_english': book_match.group(1).strip() if book_match else 'N/A',
-                            'chapter_number': chapter_number,
-                            'chapter_title_english': chapter_title_english,
-                            'hadith_number': hadith_num_match.group(1).strip() if hadith_num_match else 'N/A',
-                            'narrator_name': narrator_match.group(1).strip() if narrator_match else 'N/A',
-                            'grade_type': grade_match.group(1).strip() if grade_match else 'N/A'
-                        }
-                        print(f"[RAG] Successfully extracted previous hadith data for follow-up question")
-                except Exception as e:
-                    print(f"[RAG] Error extracting previous hadith: {e}")
-                    previous_hadith_data = None
-            else:
-                print(f"[RAG] No previous hadith found in conversation, treating as new query")
-                is_followup_question = False
-        
-        # If this is a follow-up question and we have previous hadith data, skip FAISS search
-        if is_followup_question and previous_hadith_data:
-            print(f"[RAG] Using previous hadith for follow-up question, skipping FAISS search")
-            selected_hadith_ids = []  # Empty list, we'll use previous_hadith_data directly
-            hadiths_english = [{'hadith_english': previous_hadith_data['hadith_english']}]
-        else:
+        # Load the last hadith the bot cited in this conversation (by stored hadith_id — no regex).
+        # This is passed as context to the LLM regardless of question type; the LLM decides relevance.
+        previous_hadith_context_text = None
+        if conversation_id:
+            try:
+                cursor.execute("""
+                    SELECT hadith_id FROM messages
+                    WHERE FK_conversation_id = %s
+                      AND FK_user_type_id = 2
+                      AND hadith_id IS NOT NULL
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """, (conversation_id,))
+                prev_row = cursor.fetchone()
+                if prev_row and prev_row.get('hadith_id'):
+                    cursor.execute(
+                        "SELECT hadith_english FROM hadiths WHERE hadith_id = %s",
+                        (prev_row['hadith_id'],)
+                    )
+                    prev_h = cursor.fetchone()
+                    if prev_h:
+                        previous_hadith_context_text = prev_h['hadith_english']
+                        print(f"[RAG] Loaded previous hadith (id={prev_row['hadith_id']}) as context")
+            except Exception as e:
+                conn.rollback()
+                print(f"[RAG] Could not load previous hadith context: {e}")
+
+        if True:  # Always run FAISS retrieval for every question
             # RAG Retrieval: Generate embedding using OpenAI text-embedding-3-large
             try:
-                query_embedding = get_embedding(question)
+                query_embedding = get_embedding(embedding_question)
                 query_vector = query_embedding.reshape(1, -1)
                 embedding_dim = query_embedding.shape[0]
                 print(f"[RAG] Generated embedding dimension: {embedding_dim}")
@@ -2716,12 +2721,11 @@ def chat():
                 
                 # Sort by similarity score in descending order
                 results.sort(key=lambda x: x[1], reverse=True)
-                
-                # Take the highest similarity score hadith
-                if results:
-                    best_hadith_id, best_score, source = results[0]
+
+                # Take top-3 from Bukhari so the LLM can pick the most relevant
+                for best_hadith_id, best_score, source in results[:3]:
                     selected_hadith_ids.append((source, best_hadith_id, best_score))
-                    print(f"[RAG] Bukhari: Selected hadith_id={best_hadith_id} with similarity={best_score:.4f}")
+                    print(f"[RAG] Bukhari: candidate hadith_id={best_hadith_id} similarity={best_score:.4f}")
         
         # Search Tirmizi FAISS
         if tirmizi_index is not None and tirmizi_mapping is not None:
@@ -2753,11 +2757,10 @@ def chat():
                 # Sort by similarity score in descending order
                 results.sort(key=lambda x: x[1], reverse=True)
 
-                # Take the highest similarity score hadith
-                if results:
-                    best_hadith_id, best_score, source = results[0]
+                # Take top-3 from Tirmizi so the LLM can pick the most relevant
+                for best_hadith_id, best_score, source in results[:3]:
                     selected_hadith_ids.append((source, best_hadith_id, best_score))
-                    print(f"[RAG] Tirmizi: Selected hadith_id={best_hadith_id} with similarity={best_score:.4f}")
+                    print(f"[RAG] Tirmizi: candidate hadith_id={best_hadith_id} similarity={best_score:.4f}")
 
         # Search Sahih Muslim FAISS
         if muslim_index is not None and muslim_mapping is not None:
@@ -2785,10 +2788,10 @@ def chat():
 
                 results.sort(key=lambda x: x[1], reverse=True)
 
-                if results:
-                    best_hadith_id, best_score, source = results[0]
+                # Take top-3 from Muslim so the LLM can pick the most relevant
+                for best_hadith_id, best_score, source in results[:3]:
                     selected_hadith_ids.append((source, best_hadith_id, best_score))
-                    print(f"[RAG] Sahih Muslim: Selected hadith_id={best_hadith_id} with similarity={best_score:.4f}")
+                    print(f"[RAG] Sahih Muslim: candidate hadith_id={best_hadith_id} similarity={best_score:.4f}")
 
         # If no hadith found and not a follow-up question, return without calling LLM
         if not selected_hadith_ids and not (is_followup_question and previous_hadith_data):
@@ -2817,13 +2820,8 @@ def chat():
                 'reply': bot_reply
             })
         
-        # For follow-up questions, use previous hadith data; otherwise fetch from database
-        if is_followup_question and previous_hadith_data:
-            # Use the previous hadith data we extracted
-            hadiths_english = [{'hadith_english': previous_hadith_data['hadith_english']}]
-            print(f"[RAG] Using previous hadith for follow-up question")
-        else:
-            # Fetch ONLY English translation first (to reduce input token cost)
+        # Fetch ONLY English translations first (to reduce input token cost)
+        if True:
             hadith_id_list = [int(h[1]) for h in selected_hadith_ids]
             placeholders = ','.join(['%s'] * len(hadith_id_list))
             
@@ -2869,7 +2867,7 @@ def chat():
             for i, h in enumerate(hadiths_english)
         ])
         
-        # Load previous conversation messages for context (last 5 messages to keep context manageable)
+        # Load previous conversation messages for context (last 8 messages to keep context manageable)
         conversation_history = ""
         if conversation_id:
             # Get the current message ID to exclude it from history
@@ -2896,18 +2894,18 @@ def chat():
                     WHERE FK_conversation_id = %s
                       AND message_id < %s
                     ORDER BY created_at DESC
-                    LIMIT 5
+                    LIMIT 8
                 """, (conversation_id, current_message_id))
             else:
                 cursor.execute("""
-                    SELECT 
+                    SELECT
                         message_text,
                         created_at,
                         FK_user_type_id
                     FROM messages
                     WHERE FK_conversation_id = %s
                     ORDER BY created_at DESC
-                    LIMIT 5
+                    LIMIT 8
                 """, (conversation_id,))
             
             previous_messages = cursor.fetchall()
@@ -2940,110 +2938,54 @@ def chat():
                 
                 print(f"[RAG] Loaded {len(previous_messages)} previous messages for context")
         
-        # System prompt as specified
-        system_prompt = """You are True Hadith AI, a strictly controlled Islamic Hadith Retrieval & Explanation Assistant.
-Your ONLY purpose is to:
-Retrieve authentic Hadith ONLY from the connected database:
+        # System prompt — GPT-4o outputs a JSON object {title, explanation}.
+        # All hadith metadata (Arabic, Urdu, book, chapter, etc.) is added by the backend from DB.
+        language_instruction_map = {
+            'ar': 'Respond in Arabic (العربية). Write both the title and explanation entirely in Arabic.',
+            'ur': 'Respond in Urdu (اردو). Write both the title and explanation entirely in Urdu.',
+            'en': 'Respond in English.',
+        }
+        language_instruction = language_instruction_map.get(requested_language, 'Respond in English.')
 
-- Sahih Bukhari
-- Jami` at-Tirmidhi
+        system_prompt = f"""You are True Hadith AI, a strictly controlled Islamic Hadith explanation assistant.
 
-Explain ONLY what is explicitly stated inside the retrieved Hadith text itself.
+The system has already retrieved the most relevant hadith(s) from the database. Your job is to explain them clearly.
 
-You are a verification and explanation system, NOT a scholar, mufti, preacher, or teacher.
-━━━━━━━━━━━━━━━━━━━━━
- ✅ YOU ARE ALLOWED TO:
- ━━━━━━━━━━━━━━━━━━━━━
-✔ Accept user questions in English only
-✔ Use the RAG pipeline only for retrieval
-✔ Display the following fields exactly after retrieval:
-Arabic Hadith Text
-English Translation
-Urdu Translation
-Book Name (English)
-Chapter Name (English)
-Chapter number
-Hadith Number 
-Narrator
-Hadith Grade
-✔ Provide a simple explanation STRICTLY based on the retrieved Hadith text only
- ✔ Clarify:
-Who is mentioned
-What happened
-What is explicitly stated
- ✔ Paraphrase meaning ONLY if that meaning already exists clearly in the text
+LANGUAGE: {language_instruction}
 
-━━━━━━━━━━━━━━━━━━━━━
- ❌ YOU ARE STRICTLY NOT ALLOWED TO:
- ━━━━━━━━━━━━━━━━━━━━━
-❌ No Fatwas
- ❌ No Islamic rulings
- ❌ No Halal / Haram decisions
- ❌ No scholar opinions
- ❌ No Tafsir
- ❌ No Fiqh
- ❌ No use of Qur'an
- ❌ No use of other Hadith
- ❌ No internet sources
- ❌ No assumptions
- ❌ No guesses
- ❌ No personal advice
- ❌ No moral conclusions beyond the text
-If ANY explanation requires external Islamic knowledge, you MUST reply exactly:
-"This cannot be explained using only the available hadith text."
-━━━━━━━━━━━━━━━━━━━━━
- 🟢 MANDATORY OUTPUT FORMAT (ALWAYS FOLLOW THIS)
- ━━━━━━━━━━━━━━━━━━━━━
-🔹Arabic:
- {{arabic_text}}
-🔹English:
- {{english_translation}}
-🔹Urdu:
- {{urdu_translation}}
-🔹Book:
- {{book_name_english}} 
-🔹Chapter:
-{{chapter_number}} {{chapter_english}}  
-🔹Hadith Number:
- {{hadith_number}}
-🔹Narrator:
- {{narrator}}
-🔹Grade:
- {{hadith_grade}}
-✅ Explanation (ONLY from this Hadith):
- Explain ONLY what is explicitly stated in this exact Hadith.
-Do NOT add any rulings, opinions, background stories, or external context.
-━━━━━━━━━━━━━━━━━━━━━
- 🔴 IF NO HADITH IS FOUND
- ━━━━━━━━━━━━━━━━━━━━━
-You must reply ONLY with:
-"No matching hadith found."
-━━━━━━━━━━━━━━━━━━━━━
- 🕌 SYSTEM IDENTITY RULE
- ━━━━━━━━━━━━━━━━━━━━━
-You are a safe academic Hadith verification and explanation system.
- You are NOT:
-A Mufti
-A Scholar
-A Religious Authority
-A Preacher
+ALLOWED:
+✔ Explain who is mentioned and what they said or did
+✔ Clarify what is explicitly stated in the hadith text
+✔ Paraphrase meaning that already exists clearly in the text
+✔ For broad questions, briefly address multiple hadiths provided
 
-You ONLY retrieve and explain what exists in the database."""
+NOT ALLOWED:
+✘ No Fatwas, rulings, Halal/Haram decisions
+✘ No scholar opinions, Tafsir, or Fiqh
+✘ No use of Qur'an or texts not provided
+✘ No assumptions, guesses, or personal advice
+✘ No moral conclusions beyond the text
+
+OUTPUT FORMAT — respond with ONLY valid JSON, no markdown, no code blocks, no extra text:
+{{"title": "Short 5-10 word headline summarising the main point", "explanation": "2-3 clear sentences explaining what the hadith says."}}
+
+If no hadith is relevant or none was provided, respond with:
+{{"title": "", "explanation": "No matching hadith found."}}
+
+You are a safe academic Hadith verification system, NOT a scholar, mufti, or religious authority."""
         
         # User prompt with English hadiths and conversation history
-        user_prompt = f"""{conversation_history if conversation_history else ''}User Question: {question}
+        previous_context_block = ""
+        if previous_hadith_context_text:
+            previous_context_block = f"\nPrevious Hadith (shown in last bot reply — use as context if the question relates to it):\n{previous_hadith_context_text}\n"
 
-Retrieved Hadith (English Translation Only):
+        user_prompt = f"""{conversation_history if conversation_history else ''}{previous_context_block}User Question: {question}
+
+Retrieved Hadith Candidates (English Translation Only). Choose the most relevant to the question:
 {english_hadiths_text}
 
-Based on the English translation(s) above{' and the conversation history' if conversation_history else ''}, provide an explanation that:
-1. Explains ONLY what is explicitly stated in the hadith text
-2. Clarifies who is mentioned, what happened, and what is explicitly stated
-3. Does NOT add any rulings, opinions, background stories, or external context
-4. If external knowledge is needed, say: "This cannot be explained using only the available hadith text."
-5. If this is a follow-up question, provide additional details or clarification based on the previous hadith shown
-
-The Arabic text, Urdu translation, and metadata (book, chapter, hadith number, narrator, grade) will be added to your response automatically."""
+Respond with ONLY a JSON object in this exact format (no markdown, no code block):
+{{"title": "Short headline", "explanation": "2-3 sentence explanation using only what is stated in the hadith text."}}"""
         
         # Check if we're approaching timeout before calling LLM
         elapsed_time = time.time() - request_start_time
@@ -3095,14 +3037,8 @@ The Arabic text, Urdu translation, and metadata (book, chapter, hadith number, n
                 bot_reply = f"Error generating response: {error_message[:100]}. Please try again."
         
         # After LLM response, fetch remaining hadith chunks (Arabic, Urdu, grade, narrator, book, chapter)
-        # For follow-up questions, use previous hadith data; otherwise fetch from database
         hadiths_by_book = {}  # Initialize to avoid scope issues
-        if is_followup_question and previous_hadith_data:
-            # Use the previous hadith data we extracted
-            full_hadiths = [previous_hadith_data]
-            hadith = previous_hadith_data
-            print(f"[RAG] Using previous hadith data for follow-up question")
-        else:
+        if True:
             # Sort selected_hadith_ids by similarity score (descending) to get the best match first
             if selected_hadith_ids:
                 selected_hadith_ids.sort(key=lambda x: x[2], reverse=True)
@@ -3170,178 +3106,78 @@ The Arabic text, Urdu translation, and metadata (book, chapter, hadith number, n
                 hadith = None
                 hadiths_by_book = {}
         
-        # Extract explanation from LLM response
-        explanation = bot_reply.strip()
-        
-        # Check if the explanation says "No matching hadith found" - if so, don't show hadith metadata
-        explanation_lower = explanation.lower()
-        if "no matching hadith found" in explanation_lower or "no hadith found" in explanation_lower:
-            print(f"[RAG] LLM returned 'No matching hadith found', returning error message without hadith metadata")
+        # Parse GPT-4o JSON response {title, explanation}
+        import json as _json
+        explanation_title = ''
+        explanation_body = ''
+        raw_llm = bot_reply.strip()
+
+        # Strip accidental markdown code fences
+        if raw_llm.startswith('```'):
+            raw_llm = re.sub(r'^```[a-z]*\n?', '', raw_llm).rstrip('`').strip()
+
+        try:
+            gpt_data = _json.loads(raw_llm)
+            explanation_title = str(gpt_data.get('title', '')).strip()
+            explanation_body  = str(gpt_data.get('explanation', '')).strip()
+            print(f"[RAG] GPT-4o JSON parsed — title='{explanation_title[:60]}'")
+        except (_json.JSONDecodeError, AttributeError) as _je:
+            print(f"[RAG] WARNING: GPT-4o did not return valid JSON ({_je}), using raw text as body")
+            explanation_body = raw_llm
+            explanation_title = ''
+
+        no_hadith = (
+            "no matching hadith found" in explanation_body.lower()
+            or "no hadith found" in explanation_body.lower()
+        )
+
+        # Build structured hadith evidence list (top 3 by match score)
+        hadith_evidence = []
+        if full_hadiths and not no_hadith:
+            all_sorted = sorted(selected_hadith_ids, key=lambda x: x[2], reverse=True)
+            seen_ids = set()
+            for source, h_id, score in all_sorted:
+                if h_id in seen_ids:
+                    continue
+                seen_ids.add(h_id)
+                if h_id not in hadith_map:
+                    continue
+                h = hadith_map[h_id]
+                hadith_evidence.append({
+                    'rank': len(hadith_evidence) + 1,
+                    'book_name': h.get('book_name_english') or 'N/A',
+                    'hadith_number': str(h.get('hadith_number') or 'N/A'),
+                    'narrator': h.get('narrator_name') or 'Unknown',
+                    'grade': h.get('grade_type') or 'N/A',
+                    'arabic_text': h.get('hadith_arabic') or 'N/A',
+                    'english_text': h.get('hadith_english') or 'N/A',
+                    'urdu_text': h.get('hadith_urdu') or 'N/A',
+                    'chapter': f"{h.get('chapter_number','') or ''} {h.get('chapter_title_english','') or ''}".strip(),
+                    'match_score': round(float(score), 2),
+                })
+                if len(hadith_evidence) >= 3:
+                    break
+
+        # Plain-text reply kept for history / backwards compat
+        if no_hadith:
             bot_reply = "No matching hadith found."
-            # Don't include hadith metadata if LLM says no hadith found
-        elif full_hadiths and len(full_hadiths) > 0:
-            # Remove any existing format markers from LLM response to get clean explanation
-            if '🔹Arabic:' in explanation or '🔹English:' in explanation:
-                # LLM already included format, try to extract just the explanation
-                if '✅ Explanation' in explanation:
-                    parts = explanation.split('✅ Explanation')
-                    if len(parts) > 1:
-                        explanation = parts[1].split(':', 1)[1].strip() if ':' in parts[1] else parts[1].strip()
-                elif 'Explanation' in explanation:
-                    parts = explanation.split('Explanation', 1)
-                    if len(parts) > 1:
-                        explanation = parts[1].split(':', 1)[1].strip() if ':' in parts[1] else parts[1].strip()
-                else:
-                    # If format is present but no explanation marker, use the whole response
-                    explanation = "See the hadith text above for details."
-            
-            # Construct response with hadiths from both books separately
-            # If we have hadiths from multiple books, show them separately
-            if is_followup_question and previous_hadith_data:
-                # For follow-up questions, show only the previous hadith
-                hadith = previous_hadith_data
-                bot_reply = f"""🔹Arabic:
-{hadith['hadith_arabic'] or 'N/A'}
-
-🔹English:
-{hadith['hadith_english'] or 'N/A'}
-
-🔹Urdu:
-{hadith['hadith_urdu'] or 'N/A'}
-
-🔹Book:
-{hadith['book_name_english'] or 'N/A'}
-
-🔹Chapter:
-{hadith['chapter_number'] or 'N/A'} {hadith['chapter_title_english'] or 'N/A'}
-
-🔹Hadith Number:
-{hadith['hadith_number'] or 'N/A'}
-
-🔹Narrator:
-{hadith['narrator_name'] or 'N/A'}
-
-🔹Grade:
-{hadith['grade_type'] or 'N/A'}
-
-✅ Explanation (ONLY from this Hadith):
-{explanation}"""
-            elif hadiths_by_book and len(hadiths_by_book) > 1:
-                # Multiple books - show each hadith separately by book
-                hadith_sections = []
-                
-                # Show Bukhari first if available
-                if 'bukhari' in hadiths_by_book:
-                    bukhari_hadith = hadiths_by_book['bukhari'][0]  # Get the best one
-                    hadith_sections.append(f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📖 {bukhari_hadith['book_name_english'] or 'Sahih Bukhari'}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔹Arabic:
-{bukhari_hadith['hadith_arabic'] or 'N/A'}
-
-🔹English:
-{bukhari_hadith['hadith_english'] or 'N/A'}
-
-🔹Urdu:
-{bukhari_hadith['hadith_urdu'] or 'N/A'}
-
-🔹Chapter:
-{bukhari_hadith['chapter_number'] or 'N/A'} {bukhari_hadith['chapter_title_english'] or 'N/A'}
-
-🔹Hadith Number:
-{bukhari_hadith['hadith_number'] or 'N/A'}
-
-🔹Narrator:
-{bukhari_hadith['narrator_name'] or 'N/A'}
-
-🔹Grade:
-{bukhari_hadith['grade_type'] or 'N/A'}""")
-                
-                # Show Tirmizi if available
-                if 'tirmizi' in hadiths_by_book:
-                    tirmizi_hadith = hadiths_by_book['tirmizi'][0]  # Get the best one
-                    hadith_sections.append(f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📖 {tirmizi_hadith['book_name_english'] or 'Jami` at-Tirmidhi'}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-🔹Arabic:
-{tirmizi_hadith['hadith_arabic'] or 'N/A'}
-
-🔹English:
-{tirmizi_hadith['hadith_english'] or 'N/A'}
-
-🔹Urdu:
-{tirmizi_hadith['hadith_urdu'] or 'N/A'}
-
-🔹Chapter:
-{tirmizi_hadith['chapter_number'] or 'N/A'} {tirmizi_hadith['chapter_title_english'] or 'N/A'}
-
-🔹Hadith Number:
-{tirmizi_hadith['hadith_number'] or 'N/A'}
-
-🔹Narrator:
-{tirmizi_hadith['narrator_name'] or 'N/A'}
-
-🔹Grade:
-{tirmizi_hadith['grade_type'] or 'N/A'}""")
-                
-                # Combine all hadith sections with explanation
-                bot_reply = "\n\n".join(hadith_sections) + f"""
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Explanation (ONLY from the Hadiths above):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{explanation}"""
-                
-                print(f"[RAG] Final response constructed with {len(hadiths_by_book)} books separately")
-            else:
-                # Single hadith or single book - show normally
-                if not hadith:
-                    hadith = full_hadiths[0]
-                    print(f"[RAG] WARNING: Using fallback hadith_id={hadith['hadith_id']}")
-                
-                bot_reply = f"""🔹Arabic:
-{hadith['hadith_arabic'] or 'N/A'}
-
-🔹English:
-{hadith['hadith_english'] or 'N/A'}
-
-🔹Urdu:
-{hadith['hadith_urdu'] or 'N/A'}
-
-🔹Book:
-{hadith['book_name_english'] or 'N/A'}
-
-🔹Chapter:
-{hadith['chapter_number'] or 'N/A'} {hadith['chapter_title_english'] or 'N/A'}
-
-🔹Hadith Number:
-{hadith['hadith_number'] or 'N/A'}
-
-🔹Narrator:
-{hadith['narrator_name'] or 'N/A'}
-
-🔹Grade:
-{hadith['grade_type'] or 'N/A'}
-
-✅ Explanation (ONLY from this Hadith):
-{explanation}"""
-                
-                print(f"[RAG] Final response constructed with metadata for hadith_id={hadith.get('hadith_id', 'N/A')}")
+            explanation_title = ''
+            explanation_body = 'No matching hadith found.'
         else:
-            # If we couldn't find any hadiths, use the bot_reply as is (error message)
-            print(f"[RAG] WARNING: No hadiths found in database, using LLM response as-is")
-            # bot_reply already contains the LLM response or error message
+            title_line = f"{explanation_title}\n\n" if explanation_title else ''
+            bot_reply = f"{title_line}{explanation_body}"
+
+        print(f"[RAG] Structured response — {len(hadith_evidence)} evidence hadiths")
         
-        # Save bot reply
+        # Save bot reply, storing the best hadith_id so future follow-ups can retrieve it by ID
+        saved_hadith_id = hadith.get('hadith_id') if hadith else None
         bot_message_time = datetime.now()
         cursor.execute(
             """
-            INSERT INTO messages (fk_conversation_id, fk_user_type_id, message_text, created_at)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO messages (fk_conversation_id, fk_user_type_id, message_text, hadith_id, created_at)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (conversation_id, 2, bot_reply, bot_message_time)
+            (conversation_id, 2, bot_reply, saved_hadith_id, bot_message_time)
         )
         cursor.execute(
             """
@@ -3372,9 +3208,12 @@ The Arabic text, Urdu translation, and metadata (book, chapter, hadith number, n
 
         return _make_chat_response({
             'conversation_id': conversation_id,
-            'reply': bot_reply
+            'reply': bot_reply,
+            'explanation_title': explanation_title if 'explanation_title' in locals() else '',
+            'explanation_body': explanation_body if 'explanation_body' in locals() else bot_reply,
+            'hadiths': hadith_evidence if 'hadith_evidence' in locals() else [],
         })
-        
+
     except TimeoutError as e:
         if conn:
             conn.rollback()

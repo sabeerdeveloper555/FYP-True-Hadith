@@ -1,7 +1,27 @@
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:intl/intl.dart';
 import '../services/api_service.dart';
+
+/// Detect language from typed text using Unicode ranges.
+/// Returns 'ar', 'ur', or 'en'.
+String _detectInputLanguage(String text) {
+  if (text.isEmpty) return 'en';
+  int arabicCount = 0;
+  int latinCount = 0;
+  for (final c in text.runes) {
+    if ((c >= 0x0600 && c <= 0x06FF) || (c >= 0x0750 && c <= 0x077F)) {
+      arabicCount++;
+    } else if ((c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A)) {
+      latinCount++;
+    }
+  }
+  if (arabicCount <= latinCount) return 'en';
+  // Urdu-specific chars: ں (06BA) ہ (06C1) ھ (06BE) ے (06D2) ٹ ڈ ڑ ژ ۓ
+  const urduChars = {0x06BA, 0x06C1, 0x06BE, 0x06D2, 0x0679, 0x0688, 0x0691, 0x0698, 0x06D3};
+  final hasUrdu = text.runes.any((c) => urduChars.contains(c));
+  return hasUrdu ? 'ur' : 'ar';
+}
 
 class _ConversationItem {
   final int conversationId;
@@ -37,15 +57,13 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
   final List<_ConversationItem> _conversations = [];
   int? _conversationId;
   bool _isLoading = false;
-  bool _isLoadingMessages = true;
+  bool _isLoadingMessages = false;
   bool _isLoadingConversations = false;
-  final Set<ChatMessage> _helpfulMessages = {};
 
   @override
   void initState() {
     super.initState();
     _loadConversations();
-    _loadPreviousMessages();
   }
 
   @override
@@ -140,90 +158,18 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
     return ChatMessage(text: text, isUser: isUser, timestamp: timestamp);
   }
 
-  Future<void> _loadPreviousMessages() async {
-    try {
-      setState(() {
-        _isLoadingMessages = true;
-      });
-
-      final response = await ApiService.getAllUserMessages(
-        userId: widget.userId,
-      );
-
-      final conversationId = response['conversation_id'] as int?;
-      final messages = response['messages'] as List;
-
-      if (mounted) {
-        setState(() {
-          _conversationId = conversationId;
-          _messages.clear();
-
-          for (var msg in messages) {
-            final messageText = msg['message_text'] as String? ?? '';
-            bool isUser = false;
-
-            final fkUserTypeId = msg['FK_user_type_id'];
-            if (fkUserTypeId != null) {
-              if (fkUserTypeId is int) {
-                isUser = fkUserTypeId == 1;
-              } else if (fkUserTypeId is String) {
-                isUser = fkUserTypeId == '1';
-              } else if (fkUserTypeId is double) {
-                isUser = fkUserTypeId.toInt() == 1;
-              }
-            } else if (msg['is_user'] != null) {
-              final isUserValue = msg['is_user'];
-              if (isUserValue is bool) {
-                isUser = isUserValue;
-              } else if (isUserValue is int) {
-                isUser = isUserValue == 1;
-              }
-            }
-
-            final createdAtStr = msg['created_at'] as String?;
-            DateTime timestamp;
-            if (createdAtStr != null && createdAtStr.isNotEmpty) {
-              try {
-                timestamp = DateTime.parse(createdAtStr);
-              } catch (e) {
-                timestamp = DateTime.now();
-              }
-            } else {
-              timestamp = DateTime.now();
-            }
-
-            if (messageText.isNotEmpty) {
-              _messages.add(ChatMessage(
-                text: messageText,
-                isUser: isUser,
-                timestamp: timestamp,
-              ));
-            }
-          }
-
-          _isLoadingMessages = false;
-        });
-
-        _scrollToBottom();
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoadingMessages = false;
-        });
-      }
-    }
-  }
-
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty || _isLoading) return;
+
+    final lang = _detectInputLanguage(text);
 
     setState(() {
       _messages.add(ChatMessage(
         text: text,
         isUser: true,
         timestamp: DateTime.now(),
+        language: lang,
       ));
       _messageController.clear();
       _isLoading = true;
@@ -247,6 +193,7 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
         userId: widget.userId,
         conversationId: _conversationId,
         question: text,
+        language: lang,
       );
 
       _conversationId = response['conversation_id'] as int;
@@ -631,8 +578,12 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: [
-              Text(message.text,
-                  style: const TextStyle(fontSize: 15, color: Color(0xFF2D2D2D), height: 1.5)),
+              Text(
+                message.text,
+                textDirection: message.isRtl ? ui.TextDirection.rtl : ui.TextDirection.ltr,
+                textAlign: message.isRtl ? TextAlign.right : TextAlign.left,
+                style: const TextStyle(fontSize: 15, color: Color(0xFF2D2D2D), height: 1.5),
+              ),
               const SizedBox(height: 4),
               Text(DateFormat('h:mm a').format(message.timestamp),
                   style: const TextStyle(fontSize: 10, color: Color(0xFF888888))),
@@ -729,73 +680,6 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
         ],
       ),
     );
-  }
-
-  Future<void> _regenerateMessage(int messageIndex, String question) async {
-    if (_isLoading) return;
-    setState(() {
-      _messages.removeAt(messageIndex);
-      _messages.insert(
-        messageIndex,
-        ChatMessage(text: 'Thinking...', isUser: false, timestamp: DateTime.now(), isLoading: true),
-      );
-      _isLoading = true;
-    });
-    _scrollToBottom();
-
-    try {
-      final response = await ApiService.sendChatMessage(
-        userId: widget.userId,
-        conversationId: _conversationId,
-        question: question,
-      );
-
-      _conversationId = response['conversation_id'] as int;
-      final botReply = response['reply'] as String? ?? '';
-      final expTitle = response['explanation_title'] as String? ?? '';
-      final expBody = response['explanation_body'] as String? ?? botReply;
-      final rawHadiths = response['hadiths'] as List<dynamic>? ?? [];
-      final hadiths = rawHadiths
-          .map((h) => HadithEvidence.fromJson(h as Map<String, dynamic>))
-          .toList();
-
-      if (mounted) {
-        setState(() {
-          _messages.removeAt(messageIndex);
-          _messages.insert(
-            messageIndex,
-            ChatMessage(
-              text: botReply,
-              isUser: false,
-              timestamp: DateTime.now(),
-              explanationTitle: expTitle.isNotEmpty ? expTitle : null,
-              explanationBody: expBody.isNotEmpty ? expBody : null,
-              hadiths: hadiths.isNotEmpty ? hadiths : null,
-              originalQuestion: question,
-            ),
-          );
-          _isLoading = false;
-        });
-        _scrollToBottom();
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _messages.removeAt(messageIndex);
-          _messages.insert(
-            messageIndex,
-            ChatMessage(
-              text: 'Error: ${e.toString()}',
-              isUser: false,
-              timestamp: DateTime.now(),
-              isError: true,
-            ),
-          );
-          _isLoading = false;
-        });
-        _scrollToBottom();
-      }
-    }
   }
 
   Widget _buildBotCard(ChatMessage message, int messageIndex) {
@@ -908,83 +792,7 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
             const SizedBox(height: 8),
             ...message.hadiths!.map((h) => _HadithEvidenceCard(hadith: h)),
 
-            // ── Action buttons ───────────────────────────
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
-              child: Row(
-                children: [
-                  _actionButton(
-                    icon: '👍',
-                    label: 'helpful',
-                    active: _helpfulMessages.contains(message),
-                    onTap: () {
-                      setState(() {
-                        if (_helpfulMessages.contains(message)) {
-                          _helpfulMessages.remove(message);
-                        } else {
-                          _helpfulMessages.add(message);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Thanks for your feedback!'),
-                              duration: Duration(seconds: 1),
-                            ),
-                          );
-                        }
-                      });
-                    },
-                  ),
-                  const SizedBox(width: 8),
-                  _actionButton(
-                    icon: '📋',
-                    label: 'copy',
-                    onTap: () {
-                      final copyText =
-                          '${message.explanationTitle ?? ''}\n\n${message.explanationBody ?? message.text}';
-                      _copyToClipboard(copyText);
-                    },
-                  ),
-                  const SizedBox(width: 8),
-                  _actionButton(
-                    icon: '↺',
-                    label: 'regenerate',
-                    onTap: () {
-                      if (message.originalQuestion != null) {
-                        _regenerateMessage(messageIndex, message.originalQuestion!);
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _actionButton({required String icon, required String label, required VoidCallback onTap, bool active = false}) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: active ? colorScheme.primary.withValues(alpha: 0.12) : Colors.transparent,
-          border: Border.all(
-            color: active ? colorScheme.primary : colorScheme.outline.withValues(alpha: 0.3),
-          ),
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(icon, style: const TextStyle(fontSize: 13)),
-            const SizedBox(width: 4),
-            Text(label,
-                style: TextStyle(
-                    fontSize: 12,
-                    color: active ? colorScheme.primary : colorScheme.onSurfaceVariant,
-                    fontWeight: FontWeight.w500)),
+            const SizedBox(height: 14),
           ],
         ),
       ),
@@ -1005,13 +813,6 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
         ],
       ),
       child: Icon(Icons.auto_awesome_rounded, color: colorScheme.onPrimary, size: 14),
-    );
-  }
-
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)),
     );
   }
 
@@ -1043,24 +844,30 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
                 children: [
                   const SizedBox(width: 12),
                   Expanded(
-                    child: TextField(
-                      controller: _messageController,
-                      maxLines: null,
-                      textInputAction: TextInputAction.send,
-                      enabled: !_isLoading,
-                      decoration: InputDecoration(
-                        hintText: 'Ask your question...',
-                        hintStyle: TextStyle(
-                          color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
-                          fontSize: 14,
+                    child: Builder(builder: (context) {
+                      final inputLang = _detectInputLanguage(_messageController.text);
+                      final isRtlInput = inputLang == 'ar' || inputLang == 'ur';
+                      return TextField(
+                        controller: _messageController,
+                        maxLines: null,
+                        textInputAction: TextInputAction.send,
+                        enabled: !_isLoading,
+                        textDirection: isRtlInput ? ui.TextDirection.rtl : ui.TextDirection.ltr,
+                        textAlign: isRtlInput ? TextAlign.right : TextAlign.left,
+                        decoration: InputDecoration(
+                          hintText: 'Ask your question...',
+                          hintStyle: TextStyle(
+                            color: colorScheme.onSurfaceVariant.withValues(alpha: 0.4),
+                            fontSize: 14,
+                          ),
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.symmetric(vertical: 12),
                         ),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                      style: const TextStyle(fontSize: 15),
-                      onSubmitted: (_) => _sendMessage(),
-                      onChanged: (val) => setState(() {}),
-                    ),
+                        style: const TextStyle(fontSize: 15),
+                        onSubmitted: (_) => _sendMessage(),
+                        onChanged: (val) => setState(() {}),
+                      );
+                    }),
                   ),
                 ],
               ),
@@ -1157,6 +964,7 @@ class ChatMessage {
   final String? explanationBody;
   final List<HadithEvidence>? hadiths;
   final String? originalQuestion;
+  final String language; // 'en', 'ar', 'ur'
 
   ChatMessage({
     required this.text,
@@ -1168,7 +976,10 @@ class ChatMessage {
     this.explanationBody,
     this.hadiths,
     this.originalQuestion,
+    this.language = 'en',
   });
+
+  bool get isRtl => language == 'ar' || language == 'ur';
 
   bool get hasStructuredData =>
       !isUser && !isLoading && !isError && hadiths != null && hadiths!.isNotEmpty;
@@ -1187,11 +998,23 @@ class _HadithEvidenceCard extends StatefulWidget {
 class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
   bool _expanded = false;
 
+  bool _hasKnownGrade(String grade) {
+    final g = grade.toLowerCase().trim();
+    if (g.isEmpty || g == 'n/a') return false;
+    if (g.contains('no grade') || g == 'no grade mention') return false;
+    return true;
+  }
+
   Color _gradeColor(String grade) {
     final g = grade.toLowerCase();
     if (g.contains('sahih')) return const Color(0xFF2E7D32);
     if (g.contains('hasan')) return const Color(0xFFE65100);
-    if (g.contains('da') || g.contains('weak')) return const Color(0xFFC62828);
+    // Da'if / Daif / Daeef / Dhaif / Weak / Mawdu / Munkar
+    if (g.contains('da') || g.contains('dh') || g.contains('zaif') ||
+        g.contains('weak') || g.contains('mawdu') || g.contains('munkar') ||
+        g.contains('fabricat') || g.contains('rejected')) {
+      return const Color(0xFFC62828);
+    }
     return const Color(0xFF546E7A);
   }
 
@@ -1204,8 +1027,9 @@ class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
 
     // Short book label (e.g. "Bukhari", "Muslim", "Tirmidhi")
     String shortBook = h.bookName;
-    if (shortBook.toLowerCase().contains('bukhari')) shortBook = 'Bukhari';
-    else if (shortBook.toLowerCase().contains('muslim')) shortBook = 'Muslim';
+    if (shortBook.toLowerCase().contains('bukhari')) {
+      shortBook = 'Bukhari';
+    } else if (shortBook.toLowerCase().contains('muslim')) shortBook = 'Muslim';
     else if (shortBook.toLowerCase().contains('tirmidhi') || shortBook.toLowerCase().contains('tirmizi')) {
       shortBook = 'Tirmidhi';
     }
@@ -1271,22 +1095,23 @@ class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    // Grade badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: gradeColor.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        h.grade.split(' ').first, // "Sahih", "Hasan", etc.
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: gradeColor,
+                    // Grade badge — only when grade is known
+                    if (_hasKnownGrade(h.grade))
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: gradeColor.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          h.grade.split(' ').first,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: gradeColor,
+                          ),
                         ),
                       ),
-                    ),
                     const SizedBox(width: 6),
                     Icon(
                       _expanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
@@ -1311,15 +1136,13 @@ class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Arabic snippet
+                      // Arabic text
                       if (h.arabicText.isNotEmpty && h.arabicText != 'N/A')
                         SizedBox(
                           width: double.infinity,
                           child: Text(
                             h.arabicText,
                             textAlign: TextAlign.right,
-                            maxLines: 4,
-                            overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontSize: 14,
                               height: 1.8,
@@ -1333,14 +1156,28 @@ class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
                       if (h.englishText.isNotEmpty && h.englishText != 'N/A')
                         Text(
                           h.englishText,
-                          maxLines: 6,
-                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 13,
                             height: 1.6,
                             color: colorScheme.onSurface.withValues(alpha: 0.85),
                           ),
                         ),
+                      // Urdu text
+                      if (h.urduText.isNotEmpty && h.urduText != 'N/A') ...[
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: Text(
+                            h.urduText,
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              fontSize: 13,
+                              height: 1.8,
+                              color: colorScheme.onSurface.withValues(alpha: 0.85),
+                            ),
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 10),
                       // Meta chips row: narrator · grade · match score
                       Wrap(
@@ -1348,8 +1185,9 @@ class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
                         runSpacing: 4,
                         children: [
                           _chip(h.narrator, colorScheme.onSurfaceVariant, colorScheme),
-                          _chip(h.grade.split(' ').first, gradeColor,
-                              colorScheme, bgColor: gradeColor.withValues(alpha: 0.12)),
+                          if (_hasKnownGrade(h.grade))
+                            _chip(h.grade.split(' ').first, gradeColor,
+                                colorScheme, bgColor: gradeColor.withValues(alpha: 0.12)),
                           _chip('match ${h.matchScore.toStringAsFixed(2)}',
                               colorScheme.onSurfaceVariant, colorScheme),
                         ],

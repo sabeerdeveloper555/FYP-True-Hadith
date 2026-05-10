@@ -643,6 +643,7 @@ class ApiService {
     required int userId,
     int? conversationId,
     required String question,
+    String language = 'en',
   }) async {
     try {
       // Create client with increased timeout for chat (60 seconds)
@@ -659,6 +660,7 @@ class ApiService {
             'user_id': userId,
             'conversation_id': conversationId,
             'question': question,
+            'language': language,
           }),
         )
             .timeout(
