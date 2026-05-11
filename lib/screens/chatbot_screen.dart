@@ -103,8 +103,14 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
           _isLoadingConversations = false;
         });
       }
-    } catch (_) {
-      if (mounted) setState(() => _isLoadingConversations = false);
+    } catch (e) {
+      debugPrint('Failed to load conversations: $e');
+      if (mounted) {
+        setState(() => _isLoadingConversations = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not load conversations. Please try again.')),
+        );
+      }
     }
   }
 
@@ -130,8 +136,14 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
         });
         _scrollToBottom();
       }
-    } catch (_) {
-      if (mounted) setState(() => _isLoadingMessages = false);
+    } catch (e) {
+      debugPrint('Failed to load conversation messages: $e');
+      if (mounted) {
+        setState(() => _isLoadingMessages = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not load messages. Please try again.')),
+        );
+      }
     }
   }
 

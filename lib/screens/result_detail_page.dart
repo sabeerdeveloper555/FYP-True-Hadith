@@ -53,6 +53,7 @@ class _ResultDetailPageState extends State<ResultDetailPage> {
         userId: widget.userId,
       );
 
+      if (!mounted) return;
       setState(() {
         _detail = result['detail'] as HadithDetail;
         _isBookmarked = result['bookmarked'] as bool;
@@ -60,6 +61,7 @@ class _ResultDetailPageState extends State<ResultDetailPage> {
         _isLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _errorMessage = e.toString();
         _isLoading = false;

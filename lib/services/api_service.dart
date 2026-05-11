@@ -5,13 +5,14 @@ import '../models/user_model.dart';
 import '../models/hadith_models.dart';
 
 class ApiService {
-  // Update this with your Flask backend URL
-  static const String baseUrl = 'http://192.168.100.12:5000/api';
-  // Change to your backend URL
-
-  // For Android emulator, use: http://10.0.2.2:5000/api
-  // For iOS simulator, use: http://localhost:5000/api
-  // For physical device, use your computer's IP: http://192.168.x.x:5000/api
+  // Set backend URL at build/run time via --dart-define, e.g.:
+  //   flutter run --dart-define=BACKEND_URL=http://192.168.100.12:5000/api
+  //   flutter build apk --dart-define=BACKEND_URL=https://your-server/api
+  // For Android emulator default: http://10.0.2.2:5000/api
+  static const String baseUrl = String.fromEnvironment(
+    'BACKEND_URL',
+    defaultValue: 'http://192.168.100.12:5000/api',
+  );
 
   static Future<UserModel> registerUser({
     required String firebaseUid,

@@ -67,30 +67,36 @@ class TranscriptionService {
       final uri = Uri.parse('$baseUrl/api/transcribe');
       final request = http.MultipartRequest('POST', uri);
 
-      request.files.add(await http.MultipartFile.fromPath(
+      // Read file bytes before building the request so the temp file can be
+      // safely deleted in the finally block regardless of request outcome.
+      final audioBytes = await audioFile.readAsBytes();
+      request.files.add(http.MultipartFile.fromBytes(
         'audio',
-        finalAudioPath,
+        audioBytes,
         filename: 'audio.$extension',
       ));
       if (language != null) {
         request.fields['language'] = language;
       }
 
-      // Clean up trimmed temp file after adding to request
-      if (finalAudioPath != audioPath) {
-        try {
-          await audioFile.delete();
-        } catch (e) {
-          print('Warning: Could not delete trimmed temp file: $e');
+      http.StreamedResponse? streamedResponse;
+      try {
+        streamedResponse = await request.send().timeout(
+          const Duration(seconds: 300),
+          onTimeout: () {
+            throw Exception('Transcription request timed out');
+          },
+        );
+      } finally {
+        // Clean up trimmed temp file after the request is sent (success or failure).
+        if (finalAudioPath != audioPath) {
+          try {
+            await audioFile.delete();
+          } catch (e) {
+            print('Warning: Could not delete trimmed temp file: $e');
+          }
         }
       }
-
-      final streamedResponse = await request.send().timeout(
-        const Duration(seconds: 300),
-        onTimeout: () {
-          throw Exception('Transcription request timed out');
-        },
-      );
 
       final responseBody = await streamedResponse.stream.bytesToString();
       print('📝 Transcription response status: ${streamedResponse.statusCode}');
