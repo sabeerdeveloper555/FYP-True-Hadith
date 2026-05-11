@@ -36,6 +36,17 @@ class _ResultPageState extends State<ResultPage> {
     'Jami-at-Tirmizi': ['tirmidhi', 'tirmizi'],
   };
 
+  static const double _accurateThreshold = 0.70;
+  static const double _slightThreshold = 0.45;
+
+  Color? _matchColor(HadithSummary h) {
+    final score = h.similarityScore;
+    if (score == null) return null;
+    if (score >= _accurateThreshold) return const Color(0xFF22C55E); // green
+    if (score >= _slightThreshold) return const Color(0xFFF59E0B);   // amber
+    return null; // no highlight for low/fuzzy-only results
+  }
+
   List<HadithSummary> get _filteredResults {
     if (_selectedTag == 'All') return widget.results;
     final keywords = _tagKeywords[_selectedTag] ?? [];
@@ -84,6 +95,7 @@ class _ResultPageState extends State<ResultPage> {
                         return HadithCard(
                           summary: item,
                           userId: widget.userId,
+                          highlightColor: _matchColor(item),
                           onTap: () {
                             Navigator.pushNamed(
                               context,

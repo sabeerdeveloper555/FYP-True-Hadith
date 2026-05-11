@@ -10,6 +10,7 @@ class HadithCard extends StatefulWidget {
   final VoidCallback? onBookmarkToggle;
   final bool isBookmarked;
   final int? userId;
+  final Color? highlightColor;
 
   const HadithCard({
     super.key,
@@ -19,6 +20,7 @@ class HadithCard extends StatefulWidget {
     this.onBookmarkToggle,
     this.isBookmarked = false,
     this.userId,
+    this.highlightColor,
   });
 
   @override
@@ -69,10 +71,20 @@ class _HadithCardState extends State<HadithCard> {
         .replaceAll(RegExp(r'\s{2,}'), ' ')
         .trim();
 
+    final highlight = widget.highlightColor;
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      elevation: 3,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: highlight != null ? 4 : 3,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: highlight != null
+            ? BorderSide(color: highlight, width: 2)
+            : BorderSide.none,
+      ),
+      color: highlight != null
+          ? highlight.withValues(alpha: 0.06)
+          : null,
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: widget.onTap,

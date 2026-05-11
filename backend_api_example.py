@@ -596,40 +596,33 @@ def fuzzy_search_hadiths(query, limit=20, min_similarity=60):
                 cleaned_arabic = clean_text(normalized_arabic)
                 
                 if cleaned_arabic:
-                    # Use partial_ratio for substring matching (handles missing words)
-                    # Use ratio for overall similarity (handles typos)
-                    score1 = fuzz.partial_ratio(cleaned_query.lower(), cleaned_arabic.lower())
-                    score2 = fuzz.ratio(cleaned_query.lower(), cleaned_arabic.lower())
-                    score3 = fuzz.token_sort_ratio(cleaned_query.lower(), cleaned_arabic.lower())
-                    
-                    # Take the maximum score
-                    arabic_score = max(score1, score2, score3)
+                    # partial_ratio is excluded: it inflates scores for any substring
+                    # match and floods results with false positives.
+                    score1 = fuzz.ratio(cleaned_query.lower(), cleaned_arabic.lower())
+                    score2 = fuzz.token_sort_ratio(cleaned_query.lower(), cleaned_arabic.lower())
+                    arabic_score = max(score1, score2)
                     if arabic_score > max_score:
                         max_score = arabic_score
                         best_field = 'arabic'
-            
+
             # Search in English text
             if hadith['hadith_english']:
                 english_text = clean_text(hadith['hadith_english'])
                 if english_text:
-                    score1 = fuzz.partial_ratio(cleaned_query.lower(), english_text.lower())
-                    score2 = fuzz.ratio(cleaned_query.lower(), english_text.lower())
-                    score3 = fuzz.token_sort_ratio(cleaned_query.lower(), english_text.lower())
-                    
-                    english_score = max(score1, score2, score3)
+                    score1 = fuzz.ratio(cleaned_query.lower(), english_text.lower())
+                    score2 = fuzz.token_sort_ratio(cleaned_query.lower(), english_text.lower())
+                    english_score = max(score1, score2)
                     if english_score > max_score:
                         max_score = english_score
                         best_field = 'english'
-            
+
             # Search in Urdu text
             if hadith['hadith_urdu']:
                 urdu_text = clean_text(hadith['hadith_urdu'])
                 if urdu_text:
-                    score1 = fuzz.partial_ratio(cleaned_query.lower(), urdu_text.lower())
-                    score2 = fuzz.ratio(cleaned_query.lower(), urdu_text.lower())
-                    score3 = fuzz.token_sort_ratio(cleaned_query.lower(), urdu_text.lower())
-                    
-                    urdu_score = max(score1, score2, score3)
+                    score1 = fuzz.ratio(cleaned_query.lower(), urdu_text.lower())
+                    score2 = fuzz.token_sort_ratio(cleaned_query.lower(), urdu_text.lower())
+                    urdu_score = max(score1, score2)
                     if urdu_score > max_score:
                         max_score = urdu_score
                         best_field = 'urdu'
@@ -736,6 +729,76 @@ def search_hadiths():
         if not cleaned_query:
             return jsonify({'message': 'Query cannot be empty'}), 400
 
+        # ===== REFERENCE SEARCH: "Sahih Muslim 2699", "Muslim-2699", "Bukhari 47" =====
+        # Detect book-name + hadith-number patterns and short-circuit to a direct DB
+        # lookup.  This runs before the expensive FAISS/fuzzy path.
+        ref_match = re.search(
+            r'(?:sahih\s+)?'
+            r'(muslim|bukhari|tirmidhi?|tirmizi)'
+            r'[\s\-:#]*'
+            r'(\d+)',
+            query,
+            re.IGNORECASE
+        )
+        if ref_match:
+            book_keyword = ref_match.group(1).lower()
+            hadith_num   = ref_match.group(2)
+
+            if 'muslim' in book_keyword:
+                book_filter = '%muslim%'
+            elif 'bukhari' in book_keyword:
+                book_filter = '%bukhari%'
+            else:
+                book_filter = '%tirmid%'
+
+            ref_conn   = get_db_connection()
+            ref_cursor = ref_conn.cursor(cursor_factory=RealDictCursor)
+            try:
+                ref_cursor.execute("""
+                    SELECT
+                        h.hadith_id,
+                        h.hadith_number,
+                        b.book_name_english,
+                        c.chapter_number,
+                        g.grade_type
+                    FROM hadiths h
+                    JOIN hadith_books b  ON h.FK_book_id      = b.book_id
+                    JOIN chapters    c  ON h.FK_chapter_id    = c.chapter_id
+                    LEFT JOIN hadith_grade  g ON h.FK_hadith_grade_id = g.grade_id
+                    WHERE b.book_name_english ILIKE %s
+                      AND h.hadith_number::text = %s
+                    LIMIT 5
+                """, (book_filter, hadith_num))
+                ref_hadiths = ref_cursor.fetchall()
+
+                if ref_hadiths:
+                    if user_id:
+                        ref_cursor.execute(
+                            "INSERT INTO history (FK_user_id, query_text, created_at)"
+                            " VALUES (%s, %s, %s)",
+                            (user_id, query, datetime.now())
+                        )
+                        ref_conn.commit()
+
+                    results = [{
+                        'hadith_id':        h['hadith_id'],
+                        'book_name':        h['book_name_english'],
+                        'hadith_number':    h['hadith_number'],
+                        'chapter_number':   h['chapter_number'],
+                        'grade':            h['grade_type'] or 'No grade mention',
+                        'similarity_score': 1.0,
+                    } for h in ref_hadiths]
+
+                    print(f"[Search] Reference match: {book_filter} #{hadith_num} → {len(results)} result(s)")
+                    return jsonify({'results': results}), 200
+
+            except Exception as ref_err:
+                print(f"[Search] Reference lookup failed: {ref_err}")
+            finally:
+                ref_cursor.close()
+                ref_conn.close()
+            # No DB hit — fall through to semantic search
+
         # ===== HYBRID SEARCH: Semantic + Fuzzy =====
         # Maps hadith_id -> raw FAISS relevance score (lower = more relevant for L2,
         # higher = more relevant for inner product — normalised later)
@@ -758,9 +821,22 @@ def search_hadiths():
             metric = index.metric_type
             raw = {}  # idx -> raw distance
 
+            # Absolute quality thresholds to reject clearly irrelevant FAISS results.
+            # For L2 on unit-norm vectors: dist > 1.2 → cosine_sim < 0.28 (too poor).
+            # For inner product on unit-norm vectors: dist < 0.28 → cosine_sim < 0.28.
+            ABS_L2_THRESHOLD = 1.2
+            ABS_IP_THRESHOLD = 0.28
+
             for idx, dist in zip(indices[0], distances[0]):
                 if idx < 0:
                     continue
+                # Apply absolute quality filter before accepting the result
+                if metric == faiss.METRIC_INNER_PRODUCT:
+                    if float(dist) < ABS_IP_THRESHOLD:
+                        continue
+                else:
+                    if float(dist) > ABS_L2_THRESHOLD:
+                        continue
                 hadith_id = None
                 if 'faiss_index' in mapping.columns:
                     matched = mapping[mapping['faiss_index'] == idx]
@@ -806,7 +882,7 @@ def search_hadiths():
         # 2. FUZZY SEARCH - always run in parallel with semantic (blended below)
         fuzzy_score_map = {}  # hadith_id -> fuzzy similarity 0-100 (higher = better)
         print(f"[Search] Running fuzzy search in parallel (semantic found {semantic_count})")
-        fuzzy_results = fuzzy_search_hadiths(query, limit=15, min_similarity=75)
+        fuzzy_results = fuzzy_search_hadiths(query, limit=10, min_similarity=82)
         print(f"[Search] Fuzzy search found {len(fuzzy_results)} results")
         for result in fuzzy_results:
             hid = result[0]
@@ -864,7 +940,7 @@ def search_hadiths():
         cursor.close()
         conn.close()
 
-        # Format results (include similarity_score for Flutter UI)
+        # Build results without similarity_score — it will be set after final ranking
         results = []
         for h in hadiths:
             results.append({
@@ -873,7 +949,6 @@ def search_hadiths():
                 'hadith_number': h['hadith_number'],
                 'chapter_number': h['chapter_number'],
                 'grade': h['grade_type'] or 'No grade mention',
-                'similarity_score': round(1.0 - hadith_score_map.get(h['hadith_id'], 1.0), 4),
             })
 
         # ===== FINAL RANKING: FAISS (normalised) + BM25 + Fuzzy + Grade boost =====
@@ -915,6 +990,21 @@ def search_hadiths():
 
         results.sort(key=final_score)
         print(f"[Search] Final ranking applied: FAISS+BM25+Fuzzy+GradeBoost")
+
+        # Remove results that score too poorly (final_score > 0.80 means all signals
+        # are weak — FAISS far-off, no BM25/fuzzy overlap, possibly wrong grade boost).
+        FINAL_SCORE_CUTOFF = 0.80
+        results = [r for r in results if final_score(r) <= FINAL_SCORE_CUTOFF]
+
+        # Cap at 15 results to avoid overwhelming the user with low-confidence matches
+        results = results[:15]
+
+        # Set similarity_score from the final combined score so color highlights
+        # in the Flutter app reflect actual ranking quality, not just FAISS distance.
+        # final_score range is roughly [-0.20, 1.0]; map to [0, 1] for display.
+        for r in results:
+            fs = final_score(r)
+            r['similarity_score'] = round(max(0.0, min(1.0, 1.0 - fs)), 4)
 
         # Notify user of results (handy if they minimised the app during a slow search)
         if user_id and results:
@@ -3352,5 +3442,5 @@ if __name__ == '__main__':
     HOTSPOT_IP = '192.168.137.1'
     print(f" * Android devices connect via: http://{HOTSPOT_IP}:5000")
     print("=" * 50 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False, use_debugger=False)
 
