@@ -174,6 +174,11 @@ class _ResultDetailPageState extends State<ResultDetailPage> {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final d = _detail!;
+    final displayGrade = d.grade
+        .replaceAll(RegExp(r'\s*\(?\bby\s+Darussalam\b\)?', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\(?\bDarussalam\b\)?', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s{2,}'), ' ')
+        .trim();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -205,7 +210,7 @@ class _ResultDetailPageState extends State<ResultDetailPage> {
               ),
             ),
             child: Text(
-              d.grade,
+              displayGrade,
               style: textTheme.labelLarge?.copyWith(
                 fontWeight: FontWeight.w600,
                 color: AppColors.getHadithColor(d.grade),

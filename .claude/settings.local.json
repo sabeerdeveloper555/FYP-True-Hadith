@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(netsh advfirewall firewall add rule name=\"Flask True Hadith Port 5000\" dir=in action=allow protocol=TCP localport=5000)"
+      "PowerShell(netsh advfirewall firewall add rule name=\"Flask True Hadith Port 5000\" dir=in action=allow protocol=TCP localport=5000)",
+      "Bash(flutter analyze *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(flutter --version)",
+      "Bash(dart --version)",
+      "Bash(git commit *)"
     ]
   }
 }

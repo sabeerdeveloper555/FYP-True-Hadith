@@ -66,8 +66,8 @@ class _HadithCardState extends State<HadithCard> {
     final showAccordion = widget.userId != null && widget.detail == null;
 
     final displayGrade = widget.summary.grade
+        .replaceAll(RegExp(r'\s*\(?\bby\s+Darussalam\b\)?', caseSensitive: false), '')
         .replaceAll(RegExp(r'\(?\bDarussalam\b\)?', caseSensitive: false), '')
-        .replaceFirst(RegExp(r'\s*\bby\b.*', caseSensitive: false), '')
         .replaceAll(RegExp(r'\s{2,}'), ' ')
         .trim();
 
@@ -82,9 +82,7 @@ class _HadithCardState extends State<HadithCard> {
             ? BorderSide(color: highlight, width: 2)
             : BorderSide.none,
       ),
-      color: highlight != null
-          ? highlight.withValues(alpha: 0.06)
-          : null,
+      color: highlight?.withValues(alpha: 0.06),
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: widget.onTap,
@@ -115,24 +113,6 @@ class _HadithCardState extends State<HadithCard> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      if (widget.summary.similarityScore != null) ...[
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: AppColors.primary.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            '${(widget.summary.similarityScore! * 100).toStringAsFixed(0)}% match',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.primary,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                      ],
                       Text(
                         displayGrade,
                         style: TextStyle(

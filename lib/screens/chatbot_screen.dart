@@ -1200,8 +1200,6 @@ class _HadithEvidenceCardState extends State<_HadithEvidenceCard> {
                           if (_hasKnownGrade(h.grade))
                             _chip(h.grade.split(' ').first, gradeColor,
                                 colorScheme, bgColor: gradeColor.withValues(alpha: 0.12)),
-                          _chip('match ${h.matchScore.toStringAsFixed(2)}',
-                              colorScheme.onSurfaceVariant, colorScheme),
                         ],
                       ),
                       if (h.chapter.trim().isNotEmpty)
