@@ -189,14 +189,14 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
 
     _scrollToBottom();
 
-    final loadingMessageIndex = _messages.length;
+    final loadingMsg = ChatMessage(
+      text: 'Thinking...',
+      isUser: false,
+      timestamp: DateTime.now(),
+      isLoading: true,
+    );
     setState(() {
-      _messages.add(ChatMessage(
-        text: 'Thinking...',
-        isUser: false,
-        timestamp: DateTime.now(),
-        isLoading: true,
-      ));
+      _messages.add(loadingMsg);
     });
     _scrollToBottom();
 
@@ -219,7 +219,7 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
 
       if (mounted) {
         setState(() {
-          _messages.removeAt(loadingMessageIndex);
+          _messages.remove(loadingMsg);
           _messages.add(ChatMessage(
             text: botReply,
             isUser: false,
@@ -237,7 +237,7 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
     } catch (e) {
       if (mounted) {
         setState(() {
-          _messages.removeAt(loadingMessageIndex);
+          _messages.remove(loadingMsg);
           _messages.add(ChatMessage(
             text: 'Error: ${e.toString()}',
             isUser: false,

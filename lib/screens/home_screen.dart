@@ -1106,9 +1106,11 @@ class _HomeScreenState extends State<HomeScreen>
       arguments: {'audioPath': audioPath},
     ) as String?;
     if (transcript != null && transcript.trim().isNotEmpty && mounted) {
+      final trimmed = transcript.trim();
       setState(() {
-        _searchController.text = transcript.trim();
+        _searchController.text = trimmed;
       });
+      _submitQuery(trimmed);
     }
   }
 

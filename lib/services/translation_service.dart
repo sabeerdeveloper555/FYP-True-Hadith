@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
@@ -87,32 +88,36 @@ class TranslationService extends ChangeNotifier {
       '?key=${AppConfig.googleTranslateApiKey}',
     );
 
-    final response = await http
-        .post(
-          uri,
-          headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({
-            'q': text,
-            'source': 'en',
-            'target': code,
-            'format': 'text',
-          }),
-        )
-        .timeout(const Duration(seconds: 15));
+    try {
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'q': text,
+              'source': 'en',
+              'target': code,
+              'format': 'text',
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
 
-    if (response.statusCode != 200) {
-      final err = jsonDecode(response.body);
-      final msg = err['error']?['message'] ?? 'HTTP ${response.statusCode}';
-      throw Exception('Translation failed: $msg');
+      if (response.statusCode != 200) {
+        final err = jsonDecode(response.body);
+        final msg = err['error']?['message'] ?? 'HTTP ${response.statusCode}';
+        throw Exception('Translation failed: $msg');
+      }
+
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      final translated = (body['data']?['translations'] as List?)
+          ?.firstOrNull?['translatedText'] as String?;
+
+      if (translated == null || translated.isEmpty) {
+        throw Exception('Translation failed: empty response');
+      }
+      return translated;
+    } on TimeoutException {
+      throw Exception('Translation timed out. Please check your connection and try again.');
     }
-
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    final translated = (body['data']?['translations'] as List?)
-        ?.firstOrNull?['translatedText'] as String?;
-
-    if (translated == null || translated.isEmpty) {
-      throw Exception('Translation failed: empty response');
-    }
-    return translated;
   }
 }

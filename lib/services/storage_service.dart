@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:image_picker/image_picker.dart';
@@ -108,10 +109,9 @@ class StorageService {
       // Delete the file
       await ref.delete();
     } catch (e) {
-      // If deletion fails, log but don't throw (file might not exist)
-      print(
-          'Warning: Failed to delete profile photo from Firebase Storage: ${e.toString()}');
-      rethrow; // Re-throw so caller knows deletion failed
+      // Log but don't throw — the file may already be deleted or never existed.
+      // Callers should not treat a missing Storage file as a fatal error.
+      debugPrint('Warning: Failed to delete profile photo from Firebase Storage: ${e.toString()}');
     }
   }
 

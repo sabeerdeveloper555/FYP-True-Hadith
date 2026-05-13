@@ -46,8 +46,8 @@ Future<void> main() async {
       final opts = DefaultFirebaseOptions.currentPlatform;
 
       // Quick check for placeholder Firebase config
-      if ((opts.apiKey ?? '').contains('CHANGE_ME') ||
-          (opts.appId ?? '').contains('CHANGE_ME')) {
+      if (opts.apiKey.contains('CHANGE_ME') ||
+          opts.appId.contains('CHANGE_ME')) {
         FlutterNativeSplash.remove();
         runApp(const ErrorApp(
           message:
@@ -242,7 +242,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
   UserModel? _userData;
   bool _isLoading = true;
   bool _showOnboarding = false;
-  late final Stream<User?> _authStateStream;
+  StreamSubscription<User?>? _authSubscription;
   StreamSubscription<Uri>? _linkSubscription;
 
   @override
@@ -253,16 +253,16 @@ class _AuthWrapperState extends State<AuthWrapper> {
     _checkOnboardingStatus();
 
     // Listen to Firebase auth state
-    _authStateStream = AuthService.authStateChanges;
-
-    _authStateStream.listen((user) {
+    _authSubscription = AuthService.authStateChanges.listen((user) {
       if (user != null) {
         _loadUserData();
       } else {
-        setState(() {
-          _userData = null;
-          _isLoading = false;
-        });
+        if (mounted) {
+          setState(() {
+            _userData = null;
+            _isLoading = false;
+          });
+        }
       }
     });
 
@@ -310,6 +310,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
   @override
   void dispose() {
+    _authSubscription?.cancel();
     _linkSubscription?.cancel();
     super.dispose();
   }

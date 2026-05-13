@@ -82,9 +82,9 @@ class TranscriptionService {
       http.StreamedResponse? streamedResponse;
       try {
         streamedResponse = await request.send().timeout(
-          const Duration(seconds: 300),
+          const Duration(seconds: 110),
           onTimeout: () {
-            throw Exception('Transcription request timed out');
+            throw Exception('Transcription timed out. Please check your backend connection and try again.');
           },
         );
       } finally {
@@ -115,8 +115,9 @@ class TranscriptionService {
       }
     } catch (e) {
       print('❌ Transcription error: $e');
-      if (e is Exception) rethrow;
-      throw Exception('Transcription failed: ${e.toString()}');
+      // Strip "Exception: " prefix so the UI message isn't doubled up.
+      final msg = e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+      throw Exception(msg);
     }
   }
 

@@ -868,7 +868,14 @@ def search_hadiths():
 
         # 1. SEMANTIC SEARCH (FAISS)
         try:
-            query_embedding = get_embedding(cleaned_query)
+            # Translate Urdu/Arabic to English for FAISS embedding (indexes are English-based)
+            embedding_query = cleaned_query
+            detected_lang = detect_language_from_text(cleaned_query)
+            if detected_lang in ('ar', 'ur'):
+                print(f"[Search] Detected {detected_lang} query — translating for embedding")
+                embedding_query = translate_to_english_for_embedding(cleaned_query)
+
+            query_embedding = get_embedding(embedding_query)
             query_vector = query_embedding.reshape(1, -1)
             embedding_dim = query_embedding.shape[0]
             print(f"[Search] Query embedding dimension: {embedding_dim}")
@@ -1961,34 +1968,55 @@ def transcribe_audio():
 
         try:
             client = get_openai_client()
+            print(f"🔍 Sending audio to OpenAI Whisper API...")
 
-            with open(temp_audio_path, 'rb') as f:
-                print(f"🔍 Sending audio to OpenAI Whisper API...")
+            # Run Whisper in a daemon thread — same pattern as the OCR endpoint.
+            # daemon=True ensures the thread is killed if the process exits.
+            import threading
+
+            whisper_result = {'text': None, 'error': None}
+
+            def _call_whisper():
                 try:
-                    transcript_response = client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=f,
-                        language=language,
-                        response_format="text",
-                    )
+                    with open(temp_audio_path, 'rb') as f:
+                        resp = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=f,
+                            language=language,
+                            response_format="text",
+                        )
+                    whisper_result['text'] = str(resp).strip()
+                except Exception as exc:
+                    whisper_result['error'] = exc
 
-                    transcript_text = str(transcript_response).strip()
+            whisper_thread = threading.Thread(target=_call_whisper, daemon=True)
+            whisper_thread.start()
+            whisper_thread.join(timeout=90)
 
-                    if not transcript_text:
-                        return jsonify({'message': 'Empty transcript received from API', 'success': False}), 500
+            if whisper_thread.is_alive():
+                print("❌ Whisper API timed out after 90 seconds")
+                return jsonify({
+                    'message': 'Transcription timed out. OpenAI is taking too long — please try again.',
+                    'success': False,
+                    'error': 'TIMEOUT',
+                }), 408
 
-                    print(f"✅ Transcription successful: {len(transcript_text)} characters")
-                    return jsonify({'transcript': transcript_text, 'success': True}), 200
+            if whisper_result['error'] is not None:
+                error_msg = str(whisper_result['error'])
+                print(f"❌ Whisper API Error: {error_msg}")
+                if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
+                    return jsonify({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'}), 401
+                elif 'quota' in error_msg.lower():
+                    return jsonify({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'}), 402
+                else:
+                    return jsonify({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'}), 500
 
-                except Exception as whisper_error:
-                    error_msg = str(whisper_error)
-                    print(f"❌ Whisper API Error: {error_msg}")
-                    if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
-                        return jsonify({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'}), 401
-                    elif 'quota' in error_msg.lower():
-                        return jsonify({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'}), 402
-                    else:
-                        return jsonify({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'}), 500
+            transcript_text = whisper_result['text']
+            if not transcript_text:
+                return jsonify({'message': 'Empty transcript received from API', 'success': False}), 500
+
+            print(f"✅ Transcription successful: {len(transcript_text)} characters")
+            return jsonify({'transcript': transcript_text, 'success': True}), 200
         finally:
             try:
                 if os.path.exists(temp_audio_path):

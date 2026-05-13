@@ -254,6 +254,24 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
       _isTranscribing = true;
     });
 
+    // Check backend availability before starting the long request.
+    final isAvailable = await TranscriptionService.checkServiceAvailability();
+    if (!isAvailable) {
+      if (mounted) {
+        setState(() => _isTranscribing = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Cannot reach the backend server. Make sure the server is running and your device is on the same network.',
+            ),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 6),
+          ),
+        );
+      }
+      return;
+    }
+
     try {
       // Show loading dialog
       if (mounted) {
@@ -325,11 +343,12 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
       }
 
       if (mounted) {
+        final msg = e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Transcription failed: ${e.toString()}'),
+            content: Text('Transcription failed: $msg'),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
+            duration: const Duration(seconds: 6),
           ),
         );
       }

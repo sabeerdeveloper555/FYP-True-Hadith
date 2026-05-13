@@ -251,8 +251,8 @@ class ApiService {
               summary: HadithSummary(
                 hadithId: summaryData['hadith_id'] as int,
                 bookName: summaryData['book_name'] as String,
-                hadithNumber: summaryData['hadith_number'] as String,
-                chapterNumber: summaryData['chapter_number'].toString(),
+                hadithNumber: summaryData['hadith_number']?.toString() ?? '',
+                chapterNumber: summaryData['chapter_number']?.toString() ?? '',
                 grade: summaryData['grade'] as String? ?? 'Unknown',
               ),
               createdAt: DateTime.parse(item['created_at'] as String),
@@ -343,8 +343,8 @@ class ApiService {
               .map((item) => HadithSummary(
                     hadithId: item['hadith_id'] as int,
                     bookName: item['book_name'] as String,
-                    hadithNumber: item['hadith_number'].toString(),
-                    chapterNumber: item['chapter_number'].toString(),
+                    hadithNumber: item['hadith_number']?.toString() ?? '',
+                    chapterNumber: item['chapter_number']?.toString() ?? '',
                     grade: item['grade'] as String? ?? 'No grade mention',
                     similarityScore: (item['similarity_score'] as num?)?.toDouble(),
                   ))
@@ -395,8 +395,8 @@ class ApiService {
             'detail': HadithDetail(
               hadithId: data['hadith_id'] as int,
               bookName: data['book_name'] as String,
-              hadithNumber: data['hadith_number'].toString(),
-              chapterNumber: data['chapter_number'].toString(),
+              hadithNumber: data['hadith_number']?.toString() ?? '',
+              chapterNumber: data['chapter_number']?.toString() ?? '',
               chapterName: data['chapter_name'] as String,
               grade: data['grade'] as String,
               narrator: data['narrator'] as String,

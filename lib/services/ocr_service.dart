@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:io';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
@@ -35,10 +36,9 @@ class OCRService {
   static String? _tessdataPath;
   static bool _assetsCopied = false;
 
-  // Result cache: Maps image hash to OCR result (for repeated scans)
-  static final Map<String, OCRResult> _resultCache = {};
-  static const int _maxCacheSize =
-      50; // Limit cache size to prevent memory issues
+  // Result cache: LinkedHashMap preserves insertion order for correct FIFO eviction
+  static final Map<String, OCRResult> _resultCache = LinkedHashMap();
+  static const int _maxCacheSize = 50;
 
   /// Preprocess image for Arabic/Urdu text (optimized for cursive Arabic script)
   /// MANDATORY: grayscale ONLY + light contrast enhancement
@@ -774,7 +774,9 @@ class OCRService {
               if (preprocessedPath != imagePath) {
                 try {
                   await File(preprocessedPath).delete();
-                } catch (e) {}
+                } catch (e) {
+                  debugPrint('OCR Debug: Failed to delete preprocessed file: $e');
+                }
               }
               return text;
             } else {

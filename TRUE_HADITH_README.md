@@ -141,6 +141,338 @@ The trimmed audio file is now read into bytes before building the multipart requ
 
 ---
 
+---
+
+## Bug Fixes — Round 2
+
+The following eight bugs were identified and fixed in a subsequent analysis pass.
+
+---
+
+### Bug 1 — Race Condition: Chatbot Loading Message Removed by Wrong Index
+
+**File:** `lib/screens/chatbot_screen.dart`  
+**Severity:** Critical
+
+The index of the loading bubble was captured before it was added to `_messages`. If the user sent another message before the first response arrived, indices shifted and `removeAt(loadingMessageIndex)` removed the wrong message — or threw a `RangeError` crash.
+
+```dart
+// BEFORE (index can shift before removeAt runs)
+final loadingMessageIndex = _messages.length;
+setState(() { _messages.add(loadingMsg); });
+...
+_messages.removeAt(loadingMessageIndex); // Wrong item if list changed
+```
+
+**Fix:** Store a reference to the loading message object and use `_messages.remove(loadingMsg)`, which finds the exact object by identity regardless of index changes.
+
+```dart
+// AFTER (object reference, always removes the right bubble)
+final loadingMsg = ChatMessage(text: 'Thinking...', isLoading: true, ...);
+setState(() { _messages.add(loadingMsg); });
+...
+_messages.remove(loadingMsg); // Correct — identity-based removal
+```
+
+---
+
+### Bug 2 — Memory Leak: Auth Stream Subscription Never Cancelled
+
+**File:** `lib/main.dart`  
+**Severity:** Critical
+
+`AuthService.authStateChanges.listen(...)` was called but the returned `StreamSubscription` was never stored or cancelled. The listener remained alive after `_AuthWrapperState` was disposed, holding a reference to the widget and leaking memory. Calling `setState` from a disposed widget also triggers a Flutter framework error.
+
+```dart
+// BEFORE (subscription discarded — never cancelled)
+_authStateStream.listen((user) {
+  setState(() { ... }); // Can fire after dispose
+});
+```
+
+**Fix:** Store the subscription and cancel it in `dispose()`. Also added a `mounted` guard inside the listener.
+
+```dart
+// AFTER
+_authSubscription = AuthService.authStateChanges.listen((user) {
+  if (mounted) setState(() { ... });
+});
+
+@override
+void dispose() {
+  _authSubscription?.cancel();
+  _linkSubscription?.cancel();
+  super.dispose();
+}
+```
+
+---
+
+### Bug 3 — Crash: `.toString()` Called on Nullable Map Values
+
+**File:** `lib/services/api_service.dart` (lines 255, 346–347, 398–399)  
+**Severity:** High
+
+In three places, `item['field'].toString()` was called directly on values from a decoded JSON map. If the backend omits a field or sends `null`, this throws a `NoSuchMethodError` and crashes the app.
+
+```dart
+// BEFORE (crashes if key is absent or null)
+hadithNumber: item['hadith_number'].toString(),
+chapterNumber: item['chapter_number'].toString(),
+```
+
+**Fix:** Use null-safe access with a fallback empty string.
+
+```dart
+// AFTER
+hadithNumber: item['hadith_number']?.toString() ?? '',
+chapterNumber: item['chapter_number']?.toString() ?? '',
+```
+
+---
+
+### Bug 4 — Contradictory Error Handling in Storage Service
+
+**File:** `lib/services/storage_service.dart`  
+**Severity:** High
+
+The catch block in `deleteProfilePhoto` had a comment saying *"don't throw (file might not exist)"* but immediately called `rethrow`, causing callers to always receive the exception. This made a best-effort cleanup operation behave like a fatal failure.
+
+```dart
+// BEFORE (comment contradicts the code)
+} catch (e) {
+  // If deletion fails, log but don't throw (file might not exist)
+  print('Warning: ...');
+  rethrow; // ← throws anyway
+}
+```
+
+**Fix:** Removed `rethrow` so the catch block matches its stated intent. Replaced `print` with `debugPrint`.
+
+```dart
+// AFTER
+} catch (e) {
+  // Log but don't throw — file may already be deleted or never existed.
+  debugPrint('Warning: Failed to delete profile photo: ${e.toString()}');
+}
+```
+
+---
+
+### Bug 5 — Unhandled `TimeoutException` in Translation Service
+
+**File:** `lib/services/translation_service.dart`  
+**Severity:** High
+
+`.timeout(const Duration(seconds: 15))` on the HTTP call throws a `TimeoutException` from `dart:async` when it expires. This exception was not caught, propagating up uncaught and crashing the UI with an unhandled exception.
+
+```dart
+// BEFORE (TimeoutException not caught)
+final response = await http.post(uri, ...).timeout(const Duration(seconds: 15));
+```
+
+**Fix:** Added `dart:async` import and an explicit `on TimeoutException` handler.
+
+```dart
+// AFTER
+try {
+  final response = await http.post(uri, ...).timeout(const Duration(seconds: 15));
+  ...
+} on TimeoutException {
+  throw Exception('Translation timed out. Please check your connection and try again.');
+}
+```
+
+---
+
+### Bug 6 — OCR Cache Evicts Wrong Entry (Non-Ordered Map)
+
+**File:** `lib/services/ocr_service.dart`  
+**Severity:** Medium
+
+The result cache used a plain `Map<String, OCRResult>`. When the cache was full, the "oldest" entry was evicted using `.keys.first`. However, Dart's default `Map` does not guarantee insertion order, so `.keys.first` can return any key — not the oldest. This broke the intended FIFO eviction and could keep stale entries while evicting recent ones.
+
+```dart
+// BEFORE (plain Map — no ordering guarantee)
+static final Map<String, OCRResult> _resultCache = {};
+...
+final firstKey = _resultCache.keys.first; // Not guaranteed to be oldest
+_resultCache.remove(firstKey);
+```
+
+**Fix:** Changed to `LinkedHashMap`, which preserves insertion order and makes `.keys.first` reliably return the oldest entry.
+
+```dart
+// AFTER
+import 'dart:collection';
+...
+static final Map<String, OCRResult> _resultCache = LinkedHashMap();
+```
+
+---
+
+### Bug 7 — Empty `catch` Block Silently Swallows File-Delete Errors
+
+**File:** `lib/services/ocr_service.dart`  
+**Severity:** Medium
+
+A bare `catch (e) {}` was used when deleting a preprocessed temp file. Any error during deletion was silently discarded with no log output, making it impossible to diagnose failures (e.g., permission errors, locked files on Windows).
+
+```dart
+// BEFORE (error silently swallowed)
+try {
+  await File(preprocessedPath).delete();
+} catch (e) {}
+```
+
+**Fix:** Added a `debugPrint` so failures appear in the debug console.
+
+```dart
+// AFTER
+try {
+  await File(preprocessedPath).delete();
+} catch (e) {
+  debugPrint('OCR Debug: Failed to delete preprocessed file: $e');
+}
+```
+
+---
+
+### Bug 8 — Firebase Config Check Used Redundant Null-Aware Operators
+
+**File:** `lib/main.dart`  
+**Severity:** Low
+
+The Firebase placeholder check used `(opts.apiKey ?? '')` and `(opts.appId ?? '')`, but both fields are non-nullable `String` properties. The `?? ''` branch is dead code and the Dart analyzer flags it as a warning.
+
+```dart
+// BEFORE (redundant null-aware, dead code warning)
+if ((opts.apiKey ?? '').contains('CHANGE_ME') ||
+    (opts.appId ?? '').contains('CHANGE_ME')) {
+```
+
+**Fix:** Removed the redundant null-aware operators.
+
+```dart
+// AFTER
+if (opts.apiKey.contains('CHANGE_ME') ||
+    opts.appId.contains('CHANGE_ME')) {
+```
+
+---
+
+---
+
+## Bug Fix — Round 3
+
+### Bug — Audio Transcription Always Times Out
+
+**Files:** `lib/services/transcription_service.dart`, `lib/screens/audio_trimming_page.dart`  
+**Severity:** Critical  
+**Error shown:** `Transcription failed: Exception: Transcription request timed out`
+
+#### Root Cause
+
+Three problems combined to produce this error:
+
+1. **No backend availability check** — the app skipped straight to a multipart upload with no pre-flight check. If the backend server was unreachable (wrong IP, server not running, device on a different network), the user had no way to know — they just waited until the timeout fired.
+
+2. **Timeout was 300 seconds (5 minutes)** — far too long for a short audio clip. A 3-second audio file should not require waiting 5 minutes before showing an error.
+
+3. **Error message showed `"Exception:"` twice** — the `onTimeout` callback threw `Exception('Transcription request timed out')`. The outer catch block rethrew it as-is, and the UI wrapped it again with `'Transcription failed: ${e.toString()}'`, producing: `"Transcription failed: Exception: Transcription request timed out"`.
+
+#### Fix 1 — Backend Health Check Before Starting the Request
+
+**File:** `lib/screens/audio_trimming_page.dart`
+
+Added a call to `TranscriptionService.checkServiceAvailability()` before showing the loading dialog. If the server does not respond to the health endpoint within 5 seconds, the user immediately sees a clear error instead of waiting for a long timeout.
+
+```dart
+// BEFORE (no check — user waits 300 s then sees a cryptic timeout)
+setState(() => _isTranscribing = true);
+showDialog(...); // loading spinner
+final transcript = await TranscriptionService.transcribeAudio(...);
+```
+
+```dart
+// AFTER (fast fail with actionable message)
+setState(() => _isTranscribing = true);
+final isAvailable = await TranscriptionService.checkServiceAvailability();
+if (!isAvailable) {
+  setState(() => _isTranscribing = false);
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(
+      'Cannot reach the backend server. Make sure the server is running '
+      'and your device is on the same network.',
+    ),
+    backgroundColor: Colors.red,
+    duration: Duration(seconds: 6),
+  ));
+  return;
+}
+showDialog(...); // only shown when server is reachable
+```
+
+#### Fix 2 — Timeout Reduced from 300 s to 60 s
+
+**File:** `lib/services/transcription_service.dart`
+
+300 seconds (5 minutes) is unreasonable for audio clips of a few seconds. Reduced to 60 seconds — still generous for slow servers — so failures surface quickly.
+
+```dart
+// BEFORE
+streamedResponse = await request.send().timeout(
+  const Duration(seconds: 300),
+  onTimeout: () { throw Exception('Transcription request timed out'); },
+);
+
+// AFTER
+streamedResponse = await request.send().timeout(
+  const Duration(seconds: 60),
+  onTimeout: () {
+    throw Exception(
+      'Transcription request timed out after 60 seconds. '
+      'Please check your backend connection and try again.',
+    );
+  },
+);
+```
+
+#### Fix 3 — Duplicate `"Exception:"` Prefix Removed from Error Messages
+
+**Files:** `lib/services/transcription_service.dart`, `lib/screens/audio_trimming_page.dart`
+
+The catch block in the service and the SnackBar in the UI both prepended text to the exception message, resulting in double-prefixed strings like `"Transcription failed: Exception: ..."`. Fixed by stripping the `Exception:` prefix before displaying.
+
+```dart
+// BEFORE — catch block in transcription_service.dart
+} catch (e) {
+  if (e is Exception) rethrow;
+  throw Exception('Transcription failed: ${e.toString()}');
+}
+
+// AFTER
+} catch (e) {
+  final msg = e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+  throw Exception(msg);
+}
+```
+
+```dart
+// BEFORE — SnackBar in audio_trimming_page.dart
+Text('Transcription failed: ${e.toString()}')
+
+// AFTER
+final msg = e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
+Text('Transcription failed: $msg')
+```
+
+#### Most Likely Runtime Cause
+
+The physical Android device and the backend server (`192.168.100.12:5000`) must be on the **same Wi-Fi network** and the Flask server must be actively running. The new health check will surface this immediately with a readable message instead of a silent 5-minute wait.
+
+---
+
 ## Running the App
 
 ```bash
