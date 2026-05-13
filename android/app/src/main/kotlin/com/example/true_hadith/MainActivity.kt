@@ -84,6 +84,14 @@ class MainActivity : FlutterActivity() {
             throw Exception("No audio track found in file")
         }
 
+        // MediaMuxer MPEG_4 only supports AAC. For other codecs, skip trimming.
+        val mime = audioFormat.getString(MediaFormat.KEY_MIME) ?: ""
+        if (!mime.equals("audio/mp4a-latm", ignoreCase = true) &&
+            !mime.equals("audio/aac", ignoreCase = true)) {
+            extractor.release()
+            throw Exception("Unsupported codec for trimming: $mime. Full audio will be used.")
+        }
+
         extractor.selectTrack(audioTrackIndex)
 
         val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)

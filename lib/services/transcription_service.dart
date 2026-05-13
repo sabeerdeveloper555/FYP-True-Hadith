@@ -58,6 +58,13 @@ class TranscriptionService {
           : 'm4a';
 
       final fileSize = await audioFile.length();
+      // OpenAI Whisper rejects files over 25 MB
+      if (fileSize > 25 * 1024 * 1024) {
+        throw Exception(
+          'Audio file is too large (${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB). '
+          'Please trim it to under 25 MB before transcribing.',
+        );
+      }
       print('🎤 Sending audio for transcription (multipart)...');
       print('   - File size: $fileSize bytes');
       print('   - Format: $extension');
@@ -82,7 +89,7 @@ class TranscriptionService {
       http.StreamedResponse? streamedResponse;
       try {
         streamedResponse = await request.send().timeout(
-          const Duration(seconds: 110),
+          const Duration(seconds: 200),
           onTimeout: () {
             throw Exception('Transcription timed out. Please check your backend connection and try again.');
           },
@@ -98,11 +105,21 @@ class TranscriptionService {
         }
       }
 
-      final responseBody = await streamedResponse.stream.bytesToString();
+      // The backend streams keep-alive spaces while Whisper processes,
+      // then writes the JSON result as the final chunk.
+      // trim() strips those leading spaces before parsing.
+      final rawBody = await streamedResponse.stream.bytesToString();
+      final responseBody = rawBody.trim();
       print('📝 Transcription response status: ${streamedResponse.statusCode}');
 
-      if (streamedResponse.statusCode == 200) {
-        final data = jsonDecode(responseBody);
+      if (responseBody.isEmpty) {
+        throw Exception('Empty response from server. Is the backend running?');
+      }
+
+      final data = jsonDecode(responseBody) as Map<String, dynamic>;
+      final success = data['success'] as bool? ?? false;
+
+      if (success) {
         final transcript = data['transcript'] as String? ?? '';
         if (transcript.isEmpty) {
           throw Exception('Empty transcript received from server');
@@ -110,8 +127,7 @@ class TranscriptionService {
         print('✅ Transcription successful: ${transcript.length} characters');
         return transcript.trim();
       } else {
-        final error = jsonDecode(responseBody);
-        throw Exception(error['message'] ?? 'Transcription failed');
+        throw Exception(data['message'] as String? ?? 'Transcription failed');
       }
     } catch (e) {
       print('❌ Transcription error: $e');

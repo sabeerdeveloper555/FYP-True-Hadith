@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
+import json as _json
 from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -103,16 +104,7 @@ def get_openai_client():
         api_key = os.getenv('OPENAI_API_KEY', '')
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
-        # Create client with explicit httpx client to avoid proxy issues
-        import httpx
-        try:
-            # Try creating with custom httpx client that doesn't use proxies
-            http_client = httpx.Client(trust_env=False)  # Disable env proxy detection
-            _openai_client = OpenAI(api_key=api_key, http_client=http_client)
-        except Exception as e:
-            # Fallback: try without custom http_client
-            print(f"Warning: Could not create OpenAI client with custom http_client: {e}")
-            _openai_client = OpenAI(api_key=api_key)
+        _openai_client = OpenAI(api_key=api_key)
     return _openai_client
 
 
@@ -1936,98 +1928,101 @@ def transcribe_audio():
         "transcript": "transcribed text",
         "success": true
     }
+
+    Uses chunked streaming to send keep-alive bytes every 5 s so NAT/firewall
+    idle-connection timeouts never drop the socket while Whisper is processing.
     """
     import tempfile
 
-    try:
-        if 'audio' not in request.files:
-            return jsonify({'message': 'Missing audio file in request', 'success': False}), 400
+    if 'audio' not in request.files:
+        return jsonify({'message': 'Missing audio file in request', 'success': False}), 400
 
-        audio_file = request.files['audio']
-        language = request.form.get('language') or None
+    audio_file = request.files['audio']
+    language = request.form.get('language') or None
 
-        valid_languages = ['ur', 'en', 'ar']
-        if language and language not in valid_languages:
-            return jsonify({
-                'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
-                'success': False
-            }), 400
+    valid_languages = ['ur', 'en', 'ar']
+    if language and language not in valid_languages:
+        return jsonify({
+            'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
+            'success': False
+        }), 400
 
-        filename = audio_file.filename or 'audio.m4a'
-        dot = filename.rfind('.')
-        ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
+    filename = audio_file.filename or 'audio.m4a'
+    dot = filename.rfind('.')
+    ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
 
-        print(f"🎤 Transcription request received (multipart):")
-        print(f"   - Filename: {filename}, Format: {ext}")
-        print(f"   - Language: {language if language else 'auto-detect'}")
+    print(f"🎤 Transcription request received:")
+    print(f"   - Filename: {filename}, Format: {ext}")
+    print(f"   - Language: {language if language else 'auto-detect'}")
 
-        # Save uploaded file to a temp path
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
-            audio_file.save(tmp.name)
-            temp_audio_path = tmp.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
+        audio_file.save(tmp.name)
+        temp_audio_path = tmp.name
+
+    def generate():
+        whisper_result = {'text': None, 'error': None}
+
+        def _call_whisper():
+            try:
+                client = get_openai_client()
+                print("🔍 Sending audio to OpenAI Whisper API...")
+                with open(temp_audio_path, 'rb') as f:
+                    resp = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=f,
+                        language=language,
+                        response_format="text",
+                    )
+                whisper_result['text'] = str(resp).strip()
+            except Exception as exc:
+                whisper_result['error'] = exc
+
+        whisper_thread = threading.Thread(target=_call_whisper, daemon=True)
+        whisper_thread.start()
+
+        # Poll every 5 s and yield a single space so the router never sees
+        # an idle connection. Each space is a valid JSON whitespace character,
+        # so jsonDecode on the Flutter side handles it correctly after trim().
+        elapsed = 0
+        max_wait = 150
+        while whisper_thread.is_alive() and elapsed < max_wait:
+            whisper_thread.join(timeout=5)
+            elapsed += 5
+            if whisper_thread.is_alive():
+                yield ' '
 
         try:
-            client = get_openai_client()
-            print(f"🔍 Sending audio to OpenAI Whisper API...")
-
-            # Run Whisper in a daemon thread — same pattern as the OCR endpoint.
-            # daemon=True ensures the thread is killed if the process exits.
-            import threading
-
-            whisper_result = {'text': None, 'error': None}
-
-            def _call_whisper():
-                try:
-                    with open(temp_audio_path, 'rb') as f:
-                        resp = client.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=f,
-                            language=language,
-                            response_format="text",
-                        )
-                    whisper_result['text'] = str(resp).strip()
-                except Exception as exc:
-                    whisper_result['error'] = exc
-
-            whisper_thread = threading.Thread(target=_call_whisper, daemon=True)
-            whisper_thread.start()
-            whisper_thread.join(timeout=90)
-
             if whisper_thread.is_alive():
-                print("❌ Whisper API timed out after 90 seconds")
-                return jsonify({
-                    'message': 'Transcription timed out. OpenAI is taking too long — please try again.',
+                print("❌ Whisper API timed out after 150 seconds")
+                yield _json.dumps({
+                    'message': 'Transcription timed out. Try a shorter audio clip (under 2 minutes).',
                     'success': False,
                     'error': 'TIMEOUT',
-                }), 408
-
-            if whisper_result['error'] is not None:
+                })
+            elif whisper_result['error'] is not None:
                 error_msg = str(whisper_result['error'])
                 print(f"❌ Whisper API Error: {error_msg}")
                 if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
-                    return jsonify({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'}), 401
+                    yield _json.dumps({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'})
                 elif 'quota' in error_msg.lower():
-                    return jsonify({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'}), 402
+                    yield _json.dumps({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'})
                 else:
-                    return jsonify({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'}), 500
-
-            transcript_text = whisper_result['text']
-            if not transcript_text:
-                return jsonify({'message': 'Empty transcript received from API', 'success': False}), 500
-
-            print(f"✅ Transcription successful: {len(transcript_text)} characters")
-            return jsonify({'transcript': transcript_text, 'success': True}), 200
+                    yield _json.dumps({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'})
+            else:
+                transcript_text = whisper_result['text']
+                if not transcript_text:
+                    yield _json.dumps({'message': 'Empty transcript received from API', 'success': False})
+                else:
+                    print(f"✅ Transcription successful: {len(transcript_text)} characters")
+                    yield _json.dumps({'transcript': transcript_text, 'success': True})
         finally:
             try:
                 if os.path.exists(temp_audio_path):
                     os.unlink(temp_audio_path)
-            except Exception as e:
-                print(f"Warning: Could not delete temp file: {e}")
+            except Exception as cleanup_err:
+                print(f"Warning: Could not delete temp file: {cleanup_err}")
 
-    except Exception as e:
-        import traceback
-        print(f"❌ Transcription endpoint error: {traceback.format_exc()}")
-        return jsonify({'message': f'Transcription failed: {str(e)}', 'success': False, 'error_type': type(e).__name__}), 500
+    return Response(stream_with_context(generate()), content_type='application/json')
 
 
 def is_english_only(text):

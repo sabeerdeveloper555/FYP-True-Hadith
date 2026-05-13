@@ -52,6 +52,7 @@ class _HomeScreenState extends State<HomeScreen>
   bool _isListening = false;
   bool _speechAvailable = false;
   String _lastWords = '';
+  String _voiceLocale = 'en-US'; // locale used for _speech.listen()
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
@@ -74,14 +75,23 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _initializeSpeech() async {
+    // Request microphone permission explicitly before initializing
+    final status = await Permission.microphone.request();
+    if (status.isDenied || status.isPermanentlyDenied) {
+      if (mounted) {
+        setState(() => _speechAvailable = false);
+      }
+      return;
+    }
+
     bool available = await _speech.initialize(
       onError: (error) {
         print('Speech recognition error: $error');
+        // Only stop the current listening session — do NOT set _speechAvailable=false
+        // so the mic button still works on the next tap.
         if (mounted) {
-          setState(() {
-            _isListening = false;
-            _speechAvailable = false;
-          });
+          setState(() => _isListening = false);
+          _pulseController.stop();
         }
       },
       onStatus: (status) {
@@ -105,6 +115,15 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _toggleListening() async {
+    // If already listening, stop.
+    if (_isListening) {
+      await _speech.stop();
+      setState(() => _isListening = false);
+      _pulseController.stop();
+      return;
+    }
+
+    // Ensure speech is initialized.
     if (!_speechAvailable) {
       await _initializeSpeech();
       if (!_speechAvailable) {
@@ -121,84 +140,172 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
 
-    if (_isListening) {
-      await _speech.stop();
-      setState(() {
-        _isListening = false;
-      });
-      _pulseController.stop();
-    } else {
-      setState(() {
-        _isListening = true;
-        _lastWords = '';
-      });
-      _pulseController.repeat();
+    // Ask the user which language they will speak before starting.
+    if (!mounted) return;
+    final chosenLocale = await _showVoiceLanguagePicker();
+    if (chosenLocale == null || !mounted) return; // user dismissed
+    _voiceLocale = chosenLocale;
 
-      await _speech.listen(
-        onResult: (result) {
-          if (mounted) {
-            setState(() {
-              if (result.finalResult) {
-                final newText = result.recognizedWords.trim();
-                if (newText.isNotEmpty) {
-                  if (_searchController.text.isNotEmpty &&
-                      _lastWords.isNotEmpty) {
-                    final currentText = _searchController.text;
-                    if (currentText.endsWith(_lastWords)) {
-                      _searchController.text = currentText.substring(
-                              0, currentText.length - _lastWords.length) +
-                          newText;
-                    } else {
-                      _searchController.text = '$currentText $newText';
-                    }
-                  } else {
-                    _searchController.text = newText;
-                  }
-                  _lastWords = newText;
+    setState(() {
+      _isListening = true;
+      _lastWords = '';
+    });
+    _pulseController.repeat();
 
-                  final textDirection =
-                      _getTextDirection(_searchController.text);
-                  if (textDirection == ui.TextDirection.rtl) {
-                    _searchController.selection =
-                        const TextSelection.collapsed(offset: 0);
-                  } else {
-                    _searchController.selection = TextSelection.collapsed(
-                        offset: _searchController.text.length);
-                  }
-                }
-              } else {
-                final partialText = result.recognizedWords.trim();
-                if (partialText.isNotEmpty) {
+    await _speech.listen(
+      onResult: (result) {
+        if (mounted) {
+          setState(() {
+            if (result.finalResult) {
+              final newText = result.recognizedWords.trim();
+              if (newText.isNotEmpty) {
+                if (_searchController.text.isNotEmpty &&
+                    _lastWords.isNotEmpty) {
                   final currentText = _searchController.text;
                   if (currentText.endsWith(_lastWords)) {
                     _searchController.text = currentText.substring(
                             0, currentText.length - _lastWords.length) +
-                        partialText;
+                        newText;
                   } else {
-                    _searchController.text = '$currentText $partialText';
+                    _searchController.text = '$currentText $newText';
                   }
-                  _lastWords = partialText;
+                } else {
+                  _searchController.text = newText;
+                }
+                _lastWords = newText;
 
-                  final textDirection =
-                      _getTextDirection(_searchController.text);
-                  if (textDirection == ui.TextDirection.rtl) {
-                    _searchController.selection =
-                        const TextSelection.collapsed(offset: 0);
-                  } else {
-                    _searchController.selection = TextSelection.collapsed(
-                        offset: _searchController.text.length);
-                  }
+                final textDirection =
+                    _getTextDirection(_searchController.text);
+                if (textDirection == ui.TextDirection.rtl) {
+                  _searchController.selection =
+                      const TextSelection.collapsed(offset: 0);
+                } else {
+                  _searchController.selection = TextSelection.collapsed(
+                      offset: _searchController.text.length);
                 }
               }
-            });
-          }
-        },
-        localeId: null,
-        listenMode: stt.ListenMode.confirmation,
-        cancelOnError: false,
-        partialResults: true,
-      );
-    }
+            } else {
+              final partialText = result.recognizedWords.trim();
+              if (partialText.isNotEmpty) {
+                final currentText = _searchController.text;
+                if (currentText.endsWith(_lastWords)) {
+                  _searchController.text = currentText.substring(
+                          0, currentText.length - _lastWords.length) +
+                      partialText;
+                } else {
+                  _searchController.text = '$currentText $partialText';
+                }
+                _lastWords = partialText;
+
+                final textDirection =
+                    _getTextDirection(_searchController.text);
+                if (textDirection == ui.TextDirection.rtl) {
+                  _searchController.selection =
+                      const TextSelection.collapsed(offset: 0);
+                } else {
+                  _searchController.selection = TextSelection.collapsed(
+                      offset: _searchController.text.length);
+                }
+              }
+            }
+          });
+        }
+      },
+      localeId: _voiceLocale,
+      listenMode: stt.ListenMode.confirmation,
+      cancelOnError: false,
+      partialResults: true,
+    );
+  }
+
+  /// Shows a bottom sheet asking which language the user will speak.
+  /// Returns the BCP-47 locale string, or null if dismissed.
+  Future<String?> _showVoiceLanguagePicker() {
+    return showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        final colorScheme = Theme.of(ctx).colorScheme;
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Select Voice Language',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: colorScheme.onSurface,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    _voiceLangButton(ctx, 'English', 'en-US', Icons.language),
+                    const SizedBox(width: 10),
+                    _voiceLangButton(ctx, 'اردو', 'ur-PK', Icons.translate),
+                    const SizedBox(width: 10),
+                    _voiceLangButton(ctx, 'العربية', 'ar-SA', Icons.text_fields),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _voiceLangButton(
+      BuildContext ctx, String label, String locale, IconData icon) {
+    final colorScheme = Theme.of(ctx).colorScheme;
+    final isSelected = _voiceLocale == locale;
+    return Expanded(
+      child: InkWell(
+        onTap: () => Navigator.pop(ctx, locale),
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? colorScheme.primary.withOpacity(0.15)
+                : colorScheme.surfaceContainerHighest,
+            border: Border.all(
+              color: isSelected ? colorScheme.primary : colorScheme.outline,
+              width: isSelected ? 2 : 1,
+            ),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon,
+                  size: 24,
+                  color: isSelected
+                      ? colorScheme.primary
+                      : colorScheme.onSurfaceVariant),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight:
+                      isSelected ? FontWeight.w600 : FontWeight.normal,
+                  color: isSelected
+                      ? colorScheme.primary
+                      : colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
