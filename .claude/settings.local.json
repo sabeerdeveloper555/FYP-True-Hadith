@@ -8,7 +8,9 @@
       "Bash(git push *)",
       "Bash(flutter --version)",
       "Bash(dart --version)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "PowerShell(python -c \"import sys; print\\(sys.executable\\)\")",
+      "PowerShell(python -m pip install pytesseract 2>&1)"
     ]
   }
 }
