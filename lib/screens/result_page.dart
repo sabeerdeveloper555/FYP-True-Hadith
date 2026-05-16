@@ -48,8 +48,7 @@ class _ResultPageState extends State<ResultPage> {
   }
 
   List<HadithSummary> get _filteredResults {
-    // Only show results that have a highlight (score >= _slightThreshold),
-    // sorted by similarity score descending so the best match is always first.
+    // Only show highlighted results (score >= _slightThreshold), sorted best first.
     final highlighted = widget.results
         .where((r) => _matchColor(r) != null)
         .toList()

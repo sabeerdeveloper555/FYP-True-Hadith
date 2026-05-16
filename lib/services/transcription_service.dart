@@ -7,11 +7,14 @@ import '../services/api_service.dart';
 
 /// Service for audio transcription
 class TranscriptionService {
-  /// Transcribe audio file using backend API (multipart/form-data upload).
+  /// Transcribe audio file using backend API.
+  ///
+  /// Sends audio as base64-encoded JSON (same pattern as other API endpoints)
+  /// to avoid multipart/form-data issues on Android.
   ///
   /// [audioPath] - Path to the audio file (original or trimmed)
-  /// [startSeconds] - Start time of the segment to transcribe (trims before upload)
-  /// [endSeconds] - End time of the segment to transcribe (trims before upload)
+  /// [startSeconds] - Start time of the segment to transcribe
+  /// [endSeconds] - End time of the segment to transcribe
   /// [language] - Language code: 'ur', 'en', 'ar', or null for auto-detect
   static Future<String> transcribeAudio({
     required String audioPath,
@@ -65,52 +68,50 @@ class TranscriptionService {
           'Please trim it to under 25 MB before transcribing.',
         );
       }
-      print('🎤 Sending audio for transcription (multipart)...');
+
+      print('🎤 Sending audio for transcription (JSON/base64)...');
       print('   - File size: $fileSize bytes');
       print('   - Format: $extension');
       print('   - Language: ${language ?? "auto-detect"}');
 
-      // Build multipart request — no base64 encoding, streams the file directly
-      final uri = Uri.parse('$baseUrl/api/transcribe');
-      final request = http.MultipartRequest('POST', uri);
-
-      // Read file bytes before building the request so the temp file can be
-      // safely deleted in the finally block regardless of request outcome.
+      // Read bytes and base64-encode — same upload pattern as search/other endpoints.
+      // This avoids multipart/form-data chunked-encoding issues on Android.
       final audioBytes = await audioFile.readAsBytes();
-      request.files.add(http.MultipartFile.fromBytes(
-        'audio',
-        audioBytes,
-        filename: 'audio.$extension',
-      ));
-      if (language != null) {
-        request.fields['language'] = language;
-      }
+      final audioBase64 = base64Encode(audioBytes);
 
-      http.StreamedResponse? streamedResponse;
-      try {
-        streamedResponse = await request.send().timeout(
-          const Duration(seconds: 200),
-          onTimeout: () {
-            throw Exception('Transcription timed out. Please check your backend connection and try again.');
-          },
-        );
-      } finally {
-        // Clean up trimmed temp file after the request is sent (success or failure).
-        if (finalAudioPath != audioPath) {
-          try {
-            await audioFile.delete();
-          } catch (e) {
-            print('Warning: Could not delete trimmed temp file: $e');
-          }
+      // Clean up temp trimmed file now that bytes are in memory.
+      if (finalAudioPath != audioPath) {
+        try {
+          await audioFile.delete();
+        } catch (e) {
+          print('Warning: Could not delete trimmed temp file: $e');
         }
       }
 
-      // The backend streams keep-alive spaces while Whisper processes,
-      // then writes the JSON result as the final chunk.
-      // trim() strips those leading spaces before parsing.
-      final rawBody = await streamedResponse.stream.bytesToString();
-      final responseBody = rawBody.trim();
-      print('📝 Transcription response status: ${streamedResponse.statusCode}');
+      final uri = Uri.parse('$baseUrl/api/transcribe');
+
+      // http.post() sets Content-Length explicitly, avoiding chunked encoding.
+      // The 180 s timeout covers both upload + Whisper processing (backend waits up to 150 s).
+      final response = await http
+          .post(
+            uri,
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'audio': audioBase64,
+              'filename': 'audio.$extension',
+              if (language != null) 'language': language,
+            }),
+          )
+          .timeout(
+            const Duration(seconds: 180),
+            onTimeout: () {
+              throw Exception(
+                  'Transcription timed out. The audio may be too long or the server is overloaded. Try a shorter clip.');
+            },
+          );
+
+      final responseBody = response.body.trim();
+      print('📝 Transcription response status: ${response.statusCode}');
 
       if (responseBody.isEmpty) {
         throw Exception('Empty response from server. Is the backend running?');
@@ -131,7 +132,6 @@ class TranscriptionService {
       }
     } catch (e) {
       print('❌ Transcription error: $e');
-      // Strip "Exception: " prefix so the UI message isn't doubled up.
       final msg = e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '');
       throw Exception(msg);
     }
@@ -146,9 +146,7 @@ class TranscriptionService {
       }
 
       final response = await http
-          .get(
-            Uri.parse('$baseUrl/api/health'),
-          )
+          .get(Uri.parse('$baseUrl/api/health'))
           .timeout(const Duration(seconds: 5));
 
       return response.statusCode == 200;
@@ -158,7 +156,6 @@ class TranscriptionService {
   }
 
   /// Trim audio client-side using platform channels (native Android/iOS APIs)
-  /// Uses MediaExtractor/MediaMuxer on Android and AVFoundation on iOS
   static Future<String?> _trimAudioClientSide({
     required String audioPath,
     required double startSeconds,
@@ -169,18 +166,17 @@ class TranscriptionService {
       print('   - Input: $audioPath');
       print('   - Range: ${startSeconds}s to ${endSeconds}s');
 
-      // Get temporary directory for output
       final tempDir = await getTemporaryDirectory();
       final inputFile = File(audioPath);
       final inputFileName = inputFile.path.split(RegExp(r'[/\\]')).last;
       final inputDotIndex = inputFileName.lastIndexOf('.');
-      final extension = (inputDotIndex >= 0 && inputDotIndex < inputFileName.length - 1)
-          ? inputFileName.substring(inputDotIndex + 1)
-          : 'm4a';
+      final extension =
+          (inputDotIndex >= 0 && inputDotIndex < inputFileName.length - 1)
+              ? inputFileName.substring(inputDotIndex + 1)
+              : 'm4a';
       final outputPath =
           '${tempDir.path}/trimmed_${DateTime.now().millisecondsSinceEpoch}.$extension';
 
-      // Call platform channel to trim audio
       const platform = MethodChannel('com.example.true_hadith/audio_trim');
 
       final result = await platform.invokeMethod<String>('trimAudio', {
