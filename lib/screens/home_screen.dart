@@ -514,10 +514,7 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   onChanged: (value) => setState(() {}),
                   onSubmitted: (value) {
-                    final query = value.trim();
-                    if (query.isNotEmpty) {
-                      _submitQuery(query);
-                    }
+                    _submitQuery(value.trim());
                   },
                 );
               },
@@ -1254,6 +1251,17 @@ class _HomeScreenState extends State<HomeScreen>
   // ── Submit query ───────────────────────────────────────────────────────────
 
   Future<void> _submitQuery(String query) async {
+    if (query.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please enter a search query.'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
     showDialog(
       context: context,
       barrierDismissible: false,
