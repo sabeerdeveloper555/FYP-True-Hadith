@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:true_hadith/models/hadith_models.dart';
 import 'package:true_hadith/widgets/hadith_card.dart';
-import 'package:true_hadith/core/theme/app_colors.dart';
 
 void main() {
   group('HadithCard Widget Tests', () {

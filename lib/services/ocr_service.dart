@@ -1,4 +1,3 @@
-import 'dart:collection';
 import 'dart:io';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
@@ -37,7 +36,7 @@ class OCRService {
   static bool _assetsCopied = false;
 
   // Result cache: LinkedHashMap preserves insertion order for correct FIFO eviction
-  static final Map<String, OCRResult> _resultCache = LinkedHashMap();
+  static final Map<String, OCRResult> _resultCache = {};
   static const int _maxCacheSize = 50;
 
   /// Preprocess image for Arabic/Urdu text (optimized for cursive Arabic script)

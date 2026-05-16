@@ -48,10 +48,16 @@ class _ResultPageState extends State<ResultPage> {
   }
 
   List<HadithSummary> get _filteredResults {
-    if (_selectedTag == 'All') return widget.results;
+    // Only show results that have a highlight (score >= _slightThreshold),
+    // sorted by similarity score descending so the best match is always first.
+    final highlighted = widget.results
+        .where((r) => _matchColor(r) != null)
+        .toList()
+      ..sort((a, b) => (b.similarityScore ?? 0).compareTo(a.similarityScore ?? 0));
+    if (_selectedTag == 'All') return highlighted;
     final keywords = _tagKeywords[_selectedTag] ?? [];
-    if (keywords.isEmpty) return widget.results;
-    return widget.results
+    if (keywords.isEmpty) return highlighted;
+    return highlighted
         .where((r) => keywords.any((kw) => r.bookName.toLowerCase().contains(kw)))
         .toList();
   }

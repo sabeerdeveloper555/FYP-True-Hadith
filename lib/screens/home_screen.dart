@@ -587,6 +587,36 @@ class _HomeScreenState extends State<HomeScreen>
                     Navigator.pop(modalContext);
                     if (!mounted) return;
                     try {
+                      final cameraStatus = await Permission.camera.request();
+                      if (cameraStatus.isPermanentlyDenied) {
+                        if (mounted) {
+                          ScaffoldMessenger.of(parentContext).showSnackBar(
+                            SnackBar(
+                              content: const Text(
+                                'Camera permission permanently denied. Please enable it in app settings.',
+                              ),
+                              backgroundColor: Colors.red,
+                              action: SnackBarAction(
+                                label: 'Settings',
+                                textColor: Colors.white,
+                                onPressed: () => openAppSettings(),
+                              ),
+                            ),
+                          );
+                        }
+                        return;
+                      }
+                      if (cameraStatus.isDenied) {
+                        if (mounted) {
+                          ScaffoldMessenger.of(parentContext).showSnackBar(
+                            const SnackBar(
+                              content: Text('Camera permission is required to scan hadith.'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
+                        return;
+                      }
                       final File? imageFile = await StorageService.pickImage(
                         source: ImageSource.camera,
                       );

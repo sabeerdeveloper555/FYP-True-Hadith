@@ -698,13 +698,36 @@ def search_hadiths():
     }
     """
     try:
-        data = request.get_json()
+        if not request.is_json:
+            return jsonify({'message': 'Content-Type must be application/json'}), 415
 
-        if not data:
-            return jsonify({'message': 'No data provided'}), 400
+        data = request.get_json(silent=True)
+
+        if data is None:
+            return jsonify({'message': 'Invalid JSON body'}), 400
 
         user_id = data.get('user_id')
         query = data.get('query')
+
+        if user_id is None:
+            return jsonify({'message': 'user_id is required'}), 400
+
+        if not isinstance(user_id, int):
+            return jsonify({'message': 'user_id must be an integer'}), 400
+
+        # Verify user exists before searching
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
+            if cur.fetchone() is None:
+                cur.close()
+                conn.close()
+                return jsonify({'message': 'User not found'}), 404
+            cur.close()
+            conn.close()
+        except Exception as e:
+            return jsonify({'message': f'Database error: {str(e)}'}), 500
 
         if not query:
             return jsonify({'message': 'Missing query'}), 400
