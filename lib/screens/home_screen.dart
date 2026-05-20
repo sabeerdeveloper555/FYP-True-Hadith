@@ -398,7 +398,6 @@ class _HomeScreenState extends State<HomeScreen>
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               const SizedBox(height: 16),
-
               // Logo
               Center(
                 child: Image.asset(

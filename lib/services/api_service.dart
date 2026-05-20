@@ -11,7 +11,7 @@ class ApiService {
   // For Android emulator default: http://10.0.2.2:5000/api
   static const String baseUrl = String.fromEnvironment(
     'BACKEND_URL',
-    defaultValue: 'http://YOUR_IP:5000/api',
+    defaultValue: 'http://192.168.100.12:5000/api',
   );
 
   static Future<UserModel> registerUser({
