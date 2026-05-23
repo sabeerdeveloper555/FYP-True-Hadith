@@ -321,6 +321,7 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocusNode.dispose();
     _speech.stop();
     _pulseController.dispose();
     super.dispose();
@@ -496,6 +497,7 @@ class _HomeScreenState extends State<HomeScreen>
                 final textDirection = _getTextDirection(_searchController.text);
                 return TextField(
                   controller: _searchController,
+                  focusNode: _searchFocusNode,
                   textInputAction: TextInputAction.search,
                   textDirection: textDirection,
                   maxLines: 1,
@@ -1231,6 +1233,8 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  final FocusNode _searchFocusNode = FocusNode();
+
   Future<void> _handleAudioSelected(
       BuildContext parentContext, String audioPath) async {
     if (!mounted) return;
@@ -1240,10 +1244,14 @@ class _HomeScreenState extends State<HomeScreen>
     ) as String?;
     if (transcript != null && transcript.trim().isNotEmpty && mounted) {
       final trimmed = transcript.trim();
+      final isRTL = _getTextDirection(trimmed) == ui.TextDirection.rtl;
       setState(() {
         _searchController.text = trimmed;
+        _searchController.selection = isRTL
+            ? const TextSelection.collapsed(offset: 0)
+            : TextSelection.collapsed(offset: trimmed.length);
       });
-      _submitQuery(trimmed);
+      _searchFocusNode.requestFocus();
     }
   }
 

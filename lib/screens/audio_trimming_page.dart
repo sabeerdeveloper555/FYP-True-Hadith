@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 
@@ -18,6 +19,11 @@ class AudioTrimmingPage extends StatefulWidget {
 
 class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
   final AudioPlayer _audioPlayer = AudioPlayer();
+
+  // ── Keep references so we can cancel in dispose() ──
+  StreamSubscription<PlayerState>? _playerStateSub;
+  StreamSubscription<Duration>? _durationSub;
+  StreamSubscription<Duration>? _positionSub;
 
   String? _audioPath;
   Duration _duration = Duration.zero;
@@ -42,7 +48,9 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
   @override
   void initState() {
     super.initState();
-    _audioPlayer.onPlayerStateChanged.listen((state) {
+
+    _playerStateSub = _audioPlayer.onPlayerStateChanged.listen((state) {
+      if (!mounted) return; // ← FIX: prevent setState after dispose
       setState(() {
         _isPlaying = state == PlayerState.playing;
         // Reset position when playback completes
@@ -55,7 +63,8 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
       });
     });
 
-    _audioPlayer.onDurationChanged.listen((duration) {
+    _durationSub = _audioPlayer.onDurationChanged.listen((duration) {
+      if (!mounted) return; // ← FIX
       setState(() {
         _duration = duration;
         if (_endSeconds > duration.inSeconds.toDouble()) {
@@ -64,7 +73,8 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
       });
     });
 
-    _audioPlayer.onPositionChanged.listen((position) {
+    _positionSub = _audioPlayer.onPositionChanged.listen((position) {
+      if (!mounted) return; // ← FIX
       setState(() {
         _position = position;
 
@@ -74,10 +84,8 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
             position.inSeconds >= _endSeconds.toInt()) {
           _audioPlayer.pause();
           _audioPlayer.seek(Duration(seconds: _startSeconds.toInt()));
-          setState(() {
-            _isPlaying = false;
-            _position = Duration(seconds: _startSeconds.toInt());
-          });
+          _isPlaying = false;
+          _position = Duration(seconds: _startSeconds.toInt());
         }
       });
     });
@@ -118,9 +126,11 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
         );
       }
     } finally {
-      setState(() {
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -192,6 +202,7 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
 
   Future<void> _stop() async {
     await _audioPlayer.stop();
+    if (!mounted) return;
     setState(() {
       _position = _playFullAudio
           ? Duration.zero
@@ -211,9 +222,11 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
       totalDurationSeconds: _duration.inSeconds.toDouble(),
     );
 
-    setState(() {
-      _validationError = error;
-    });
+    if (mounted) {
+      setState(() {
+        _validationError = error;
+      });
+    }
   }
 
   Future<void> _generateTranscript() async {
@@ -319,6 +332,9 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
       print('   - Trim: ${_startSeconds}s to ${_endSeconds}s');
       print('   - Language selected: $_selectedLanguage (code: $languageCode)');
 
+      // Stop audio playback before transcribing
+      await _audioPlayer.stop();
+
       // Transcribe audio with trim positions and language
       final transcript = await TranscriptionService.transcribeAudio(
         audioPath: _audioPath!,
@@ -363,6 +379,10 @@ class _AudioTrimmingPageState extends State<AudioTrimmingPage> {
 
   @override
   void dispose() {
+    // ── Cancel stream subscriptions BEFORE disposing the player ──
+    _playerStateSub?.cancel();
+    _durationSub?.cancel();
+    _positionSub?.cancel();
     _audioPlayer.dispose();
     super.dispose();
   }

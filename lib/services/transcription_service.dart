@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -9,13 +10,9 @@ import '../services/api_service.dart';
 class TranscriptionService {
   /// Transcribe audio file using backend API.
   ///
-  /// Sends audio as base64-encoded JSON (same pattern as other API endpoints)
-  /// to avoid multipart/form-data issues on Android.
-  ///
-  /// [audioPath] - Path to the audio file (original or trimmed)
-  /// [startSeconds] - Start time of the segment to transcribe
-  /// [endSeconds] - End time of the segment to transcribe
-  /// [language] - Language code: 'ur', 'en', 'ar', or null for auto-detect
+  /// Uses multipart/form-data (like a browser file upload) which is the most
+  /// reliable method on Android — avoids base64 bloat and chunked-encoding
+  /// issues that cause silent request hangs.
   static Future<String> transcribeAudio({
     required String audioPath,
     double? startSeconds,
@@ -28,7 +25,16 @@ class TranscriptionService {
         baseUrl = baseUrl.substring(0, baseUrl.length - 4);
       }
 
-      // Trim audio client-side when a non-zero start is requested
+      // ── Step 0: Verify backend is reachable ──
+      final isAvailable = await checkServiceAvailability();
+      if (!isAvailable) {
+        throw Exception(
+          'Backend server is not reachable at $baseUrl. '
+          'Make sure the Flask server is running and your phone is on the same network.',
+        );
+      }
+
+      // ── Step 1: Trim audio client-side when needed ──
       String finalAudioPath = audioPath;
       if (startSeconds != null && endSeconds != null && startSeconds > 0) {
         try {
@@ -61,7 +67,7 @@ class TranscriptionService {
           : 'm4a';
 
       final fileSize = await audioFile.length();
-      // OpenAI Whisper rejects files over 25 MB
+
       if (fileSize > 25 * 1024 * 1024) {
         throw Exception(
           'Audio file is too large (${(fileSize / (1024 * 1024)).toStringAsFixed(1)} MB). '
@@ -69,66 +75,123 @@ class TranscriptionService {
         );
       }
 
-      print('🎤 Sending audio for transcription (JSON/base64)...');
-      print('   - File size: $fileSize bytes');
-      print('   - Format: $extension');
-      print('   - Language: ${language ?? "auto-detect"}');
-
-      // Read bytes and base64-encode — same upload pattern as search/other endpoints.
-      // This avoids multipart/form-data chunked-encoding issues on Android.
-      final audioBytes = await audioFile.readAsBytes();
-      final audioBase64 = base64Encode(audioBytes);
-
-      // Clean up temp trimmed file now that bytes are in memory.
-      if (finalAudioPath != audioPath) {
-        try {
-          await audioFile.delete();
-        } catch (e) {
-          print('Warning: Could not delete trimmed temp file: $e');
-        }
+      if (fileSize < 1000) {
+        throw Exception(
+          'Audio file is too small ($fileSize bytes) — it may be empty or corrupted.',
+        );
       }
 
       final uri = Uri.parse('$baseUrl/api/transcribe');
 
-      // http.post() sets Content-Length explicitly, avoiding chunked encoding.
-      // The 180 s timeout covers both upload + Whisper processing (backend waits up to 150 s).
-      final response = await http
-          .post(
-            uri,
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'audio': audioBase64,
-              'filename': 'audio.$extension',
-              if (language != null) 'language': language,
-            }),
-          )
-          .timeout(
-            const Duration(seconds: 180),
-            onTimeout: () {
-              throw Exception(
-                  'Transcription timed out. The audio may be too long or the server is overloaded. Try a shorter clip.');
-            },
-          );
+      print('🎤 Preparing multipart upload...');
+      print('   - File: $finalAudioPath');
+      print('   - Size: $fileSize bytes (${(fileSize / 1024).toStringAsFixed(1)} KB)');
+      print('   - Format: $extension');
+      print('   - Language: ${language ?? "auto-detect"}');
+      print('   - Endpoint: $uri');
 
-      final responseBody = response.body.trim();
-      print('📝 Transcription response status: ${response.statusCode}');
+      // ── Step 2: Build multipart request ──
+      // Multipart is MORE reliable than base64 JSON on Android because:
+      // 1. No 33% size bloat from base64 encoding
+      // 2. http.MultipartRequest uses proper Content-Length (no chunked encoding)
+      // 3. Standard browser-style file upload that every server handles well
 
-      if (responseBody.isEmpty) {
-        throw Exception('Empty response from server. Is the backend running?');
+      final request = http.MultipartRequest('POST', uri);
+
+      // Add audio file
+      request.files.add(await http.MultipartFile.fromPath(
+        'audio',
+        finalAudioPath,
+        filename: 'audio.$extension',
+      ));
+
+      // Add language field if specified
+      if (language != null) {
+        request.fields['language'] = language;
       }
 
-      final data = jsonDecode(responseBody) as Map<String, dynamic>;
+      print('📤 Sending multipart request...');
+
+      // ── Step 3: Send with timeout ──
+      http.Response response;
+      try {
+        final streamedResponse = await request.send().timeout(
+          const Duration(seconds: 150),
+          onTimeout: () {
+            throw TimeoutException('Upload timed out after 150 seconds');
+          },
+        );
+
+        print('📥 Upload complete, reading response (HTTP ${streamedResponse.statusCode})...');
+
+        response = await http.Response.fromStream(streamedResponse).timeout(
+          const Duration(seconds: 30),
+          onTimeout: () {
+            throw TimeoutException('Response read timed out');
+          },
+        );
+      } on SocketException catch (e) {
+        print('❌ SocketException: $e');
+        throw Exception(
+          'Cannot connect to the backend server. '
+          'Check that Flask is running and your phone is on the same Wi-Fi.',
+        );
+      } on TimeoutException catch (e) {
+        print('❌ Timeout: $e');
+        throw Exception(
+          'Transcription request timed out. '
+          'Check your network connection and try again.',
+        );
+      }
+
+      // Clean up temp trimmed file
+      if (finalAudioPath != audioPath) {
+        try {
+          await File(finalAudioPath).delete();
+        } catch (_) {}
+      }
+
+      final responseBody = response.body.trim();
+      print('📝 Response: HTTP ${response.statusCode} (${responseBody.length} chars)');
+
+      if (responseBody.isEmpty) {
+        throw Exception(
+          'Empty response from server (HTTP ${response.statusCode}). '
+          'Check Flask console logs.',
+        );
+      }
+
+      // ── Step 4: Parse response ──
+      Map<String, dynamic> data;
+      try {
+        data = jsonDecode(responseBody) as Map<String, dynamic>;
+      } catch (e) {
+        print('❌ Failed to parse: ${responseBody.substring(0, responseBody.length > 200 ? 200 : responseBody.length)}');
+        throw Exception('Invalid response from server (HTTP ${response.statusCode}).');
+      }
+
       final success = data['success'] as bool? ?? false;
 
       if (success) {
         final transcript = data['transcript'] as String? ?? '';
         if (transcript.isEmpty) {
-          throw Exception('Empty transcript received from server');
+          throw Exception(
+            'Whisper returned an empty transcript. '
+            'The audio may be silent or too noisy.',
+          );
         }
         print('✅ Transcription successful: ${transcript.length} characters');
         return transcript.trim();
       } else {
-        throw Exception(data['message'] as String? ?? 'Transcription failed');
+        final serverMsg = data['message'] as String? ?? 'Unknown error';
+        final errorCode = data['error'] as String? ?? '';
+        if (errorCode == 'API_KEY_ERROR' || errorCode == 'API_KEY_MISSING') {
+          throw Exception('OpenAI API key issue on the server.');
+        } else if (errorCode == 'QUOTA_ERROR') {
+          throw Exception('OpenAI API quota exceeded.');
+        } else {
+          throw Exception('Transcription failed: $serverMsg');
+        }
       }
     } catch (e) {
       print('❌ Transcription error: $e');
@@ -137,7 +200,7 @@ class TranscriptionService {
     }
   }
 
-  /// Check if transcription service is available
+  /// Check if backend is reachable
   static Future<bool> checkServiceAvailability() async {
     try {
       String baseUrl = ApiService.baseUrl;
@@ -151,21 +214,18 @@ class TranscriptionService {
 
       return response.statusCode == 200;
     } catch (e) {
+      print('⚠️ Health check failed: $e');
       return false;
     }
   }
 
-  /// Trim audio client-side using platform channels (native Android/iOS APIs)
+  /// Trim audio client-side using platform channels
   static Future<String?> _trimAudioClientSide({
     required String audioPath,
     required double startSeconds,
     required double endSeconds,
   }) async {
     try {
-      print('✂️ Trimming audio using native platform APIs...');
-      print('   - Input: $audioPath');
-      print('   - Range: ${startSeconds}s to ${endSeconds}s');
-
       final tempDir = await getTemporaryDirectory();
       final inputFile = File(audioPath);
       final inputFileName = inputFile.path.split(RegExp(r'[/\\]')).last;
@@ -187,22 +247,14 @@ class TranscriptionService {
       });
 
       if (result != null && await File(result).exists()) {
-        final outputFile = File(result);
-        final fileSize = await outputFile.length();
-        print('✅ Audio trimmed successfully');
-        print('   - Output: $result');
-        print('   - Size: $fileSize bytes');
         return result;
-      } else {
-        print('⚠️ Trimming returned null or file not found');
-        return null;
       }
+      return null;
     } on PlatformException catch (e) {
-      print('❌ Platform error trimming audio: ${e.message}');
-      print('   Code: ${e.code}');
+      print('❌ Platform error trimming: ${e.message}');
       return null;
     } catch (e) {
-      print('❌ Error trimming audio: $e');
+      print('❌ Error trimming: $e');
       return null;
     }
   }

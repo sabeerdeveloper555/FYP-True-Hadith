@@ -48,15 +48,13 @@ class _ResultPageState extends State<ResultPage> {
   }
 
   List<HadithSummary> get _filteredResults {
-    // Only show highlighted results (score >= _slightThreshold), sorted best first.
-    final highlighted = widget.results
-        .where((r) => _matchColor(r) != null)
-        .toList()
+    // Show all results, sorted best first.
+    final sorted = [...widget.results]
       ..sort((a, b) => (b.similarityScore ?? 0).compareTo(a.similarityScore ?? 0));
-    if (_selectedTag == 'All') return highlighted;
+    if (_selectedTag == 'All') return sorted;
     final keywords = _tagKeywords[_selectedTag] ?? [];
-    if (keywords.isEmpty) return highlighted;
-    return highlighted
+    if (keywords.isEmpty) return sorted;
+    return sorted
         .where((r) => keywords.any((kw) => r.bookName.toLowerCase().contains(kw)))
         .toList();
   }

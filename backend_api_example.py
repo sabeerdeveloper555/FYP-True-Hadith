@@ -1013,13 +1013,13 @@ def search_hadiths():
         results.sort(key=final_score)
         print(f"[Search] Final ranking applied: FAISS+BM25+Fuzzy+GradeBoost")
 
-        # Remove results that score too poorly (final_score > 0.80 means all signals
+        # Remove results that score too poorly (final_score > 0.90 means all signals
         # are weak — FAISS far-off, no BM25/fuzzy overlap, possibly wrong grade boost).
-        FINAL_SCORE_CUTOFF = 0.80
+        FINAL_SCORE_CUTOFF = 0.90
         results = [r for r in results if final_score(r) <= FINAL_SCORE_CUTOFF]
 
-        # Cap at 15 results to avoid overwhelming the user with low-confidence matches
-        results = results[:15]
+        # Cap at 30 results
+        results = results[:30]
 
         # Set similarity_score from the final combined score so color highlights
         # in the Flutter app reflect actual ranking quality, not just FAISS distance.
@@ -1937,92 +1937,242 @@ def easyocr_extract_text():
         }), 500
 
 
+# @app.route('/api/transcribe', methods=['POST'])
+# def transcribe_audio():
+#     """
+#     Transcribe audio file using OpenAI Whisper API.
+
+#     Accepts multipart/form-data:
+#         - audio    : the audio file (required)
+#         - language : 'ur', 'en', or 'ar' (optional, omit for auto-detect)
+
+#     Returns:
+#     {
+#         "transcript": "transcribed text",
+#         "success": true
+#     }
+
+#     Uses chunked streaming to send keep-alive bytes every 5 s so NAT/firewall
+#     idle-connection timeouts never drop the socket while Whisper is processing.
+#     """
+#     import tempfile
+
+#     valid_languages = ['ur', 'en', 'ar']
+
+#     # Accept JSON base64 (Flutter mobile) or multipart (legacy / other clients)
+#     if request.is_json:
+#         data = request.get_json(silent=True) or {}
+#         audio_base64 = data.get('audio')
+#         language = data.get('language') or None
+#         filename = data.get('filename', 'audio.m4a')
+
+#         if not audio_base64:
+#             return jsonify({'message': 'Missing audio data in request', 'success': False}), 400
+
+#         if language and language not in valid_languages:
+#             return jsonify({
+#                 'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
+#                 'success': False
+#             }), 400
+
+#         dot = filename.rfind('.')
+#         ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
+
+#         try:
+#             audio_bytes = base64.b64decode(audio_base64)
+#         except Exception:
+#             return jsonify({'message': 'Invalid base64 audio data', 'success': False}), 400
+
+#         print(f"🎤 Transcription request received (JSON/base64):")
+#         print(f"   - Filename: {filename}, Format: {ext}, Size: {len(audio_bytes)} bytes")
+#         print(f"   - Language: {language if language else 'auto-detect'}")
+
+#         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
+#             tmp.write(audio_bytes)
+#             temp_audio_path = tmp.name
+#     else:
+#         # Legacy multipart support
+#         if 'audio' not in request.files:
+#             return jsonify({'message': 'Missing audio file in request', 'success': False}), 400
+
+#         audio_file = request.files['audio']
+#         language = request.form.get('language') or None
+
+#         if language and language not in valid_languages:
+#             return jsonify({
+#                 'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
+#                 'success': False
+#             }), 400
+
+#         filename = audio_file.filename or 'audio.m4a'
+#         dot = filename.rfind('.')
+#         ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
+
+#         print(f"🎤 Transcription request received (multipart):")
+#         print(f"   - Filename: {filename}, Format: {ext}")
+#         print(f"   - Language: {language if language else 'auto-detect'}")
+
+#         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
+#             audio_file.save(tmp.name)
+#             temp_audio_path = tmp.name
+
+#     # Call Whisper directly (blocking). The streaming/keep-alive approach caused
+#     # http.post() on Android to hang because the chunked response never closed
+#     # cleanly. A plain blocking call + Connection:close avoids this entirely.
+#     # On a local network, NAT idle-timeout is not a concern.
+#     try:
+#         client = get_openai_client()
+#         print("🔍 Sending audio to OpenAI Whisper API...")
+#         with open(temp_audio_path, 'rb') as f:
+#             resp = client.audio.transcriptions.create(
+#                 model="whisper-1",
+#                 file=f,
+#                 language=language,
+#                 response_format="text",
+#             )
+#         transcript_text = str(resp).strip()
+#         if not transcript_text:
+#             result = jsonify({'message': 'Empty transcript received from API', 'success': False})
+#             result.status_code = 422
+#         else:
+#             print(f"✅ Transcription successful: {len(transcript_text)} characters")
+#             result = jsonify({'transcript': transcript_text, 'success': True})
+#     except Exception as exc:
+#         error_msg = str(exc)
+#         print(f"❌ Whisper API Error: {error_msg}")
+#         if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
+#             result = jsonify({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'})
+#         elif 'quota' in error_msg.lower():
+#             result = jsonify({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'})
+#         else:
+#             result = jsonify({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'})
+#         result.status_code = 500
+#     finally:
+#         try:
+#             if os.path.exists(temp_audio_path):
+#                 os.unlink(temp_audio_path)
+#         except Exception as cleanup_err:
+#             print(f"Warning: Could not delete temp file: {cleanup_err}")
+
+#     result.headers['Connection'] = 'close'
+#     return result
+
+## ============================================================
+## IMPROVED /api/transcribe ENDPOINT
+## Replace your existing transcribe_audio() function with this.
+## ============================================================
+ 
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe_audio():
     """
     Transcribe audio file using OpenAI Whisper API.
-
-    Accepts multipart/form-data:
-      - audio    : the audio file (required)
-      - language : 'ur', 'en', or 'ar' (optional, omit for auto-detect)
-
+ 
+    Accepts JSON (base64) or multipart/form-data.
     Returns:
     {
         "transcript": "transcribed text",
         "success": true
     }
-
-    Uses chunked streaming to send keep-alive bytes every 5 s so NAT/firewall
-    idle-connection timeouts never drop the socket while Whisper is processing.
     """
     import tempfile
-
     valid_languages = ['ur', 'en', 'ar']
+    # ── 0. Validate OpenAI API key upfront ──────────────────────────
+    api_key = os.getenv('OPENAI_API_KEY', '').strip()
+    if not api_key:
+        print("❌ OPENAI_API_KEY is missing from .env!")
+        return jsonify({
+            'message': 'OpenAI API key is not configured on the server. '
+                        'Set OPENAI_API_KEY in your .env file.',
+            'success': False,
+            'error': 'API_KEY_MISSING',
+        }), 500
 
-    # Accept JSON base64 (Flutter mobile) or multipart (legacy / other clients)
+    if api_key.startswith('sk-') is False and api_key.startswith('sk-proj-') is False:
+        print(f"⚠ OPENAI_API_KEY looks invalid (starts with: {api_key[:8]}...)")
+    # ── 1. Parse request (JSON base64 or multipart) ─────────────────
     if request.is_json:
         data = request.get_json(silent=True) or {}
         audio_base64 = data.get('audio')
         language = data.get('language') or None
         filename = data.get('filename', 'audio.m4a')
-
+ 
         if not audio_base64:
-            return jsonify({'message': 'Missing audio data in request', 'success': False}), 400
-
+            return jsonify({
+                'message': 'Missing audio data in request',
+                'success': False,
+            }), 400
+ 
         if language and language not in valid_languages:
             return jsonify({
                 'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
-                'success': False
+                'success': False,
             }), 400
-
+ 
         dot = filename.rfind('.')
         ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
-
+ 
         try:
             audio_bytes = base64.b64decode(audio_base64)
         except Exception:
-            return jsonify({'message': 'Invalid base64 audio data', 'success': False}), 400
-
-        print(f"🎤 Transcription request received (JSON/base64):")
-        print(f"   - Filename: {filename}, Format: {ext}, Size: {len(audio_bytes)} bytes")
+            return jsonify({
+                'message': 'Invalid base64 audio data',
+                'success': False,
+            }), 400
+ 
+        print(f"🎤 Transcription request (JSON/base64):")
+        print(f"   - Filename: {filename}, Format: {ext}")
+        print(f"   - Decoded size: {len(audio_bytes)} bytes ({len(audio_bytes)/1024:.1f} KB)")
         print(f"   - Language: {language if language else 'auto-detect'}")
-
+ 
+        # Sanity check: reject suspiciously small files
+        if len(audio_bytes) < 1000:
+            return jsonify({
+                'message': f'Audio file too small ({len(audio_bytes)} bytes) — may be empty or corrupted.',
+                'success': False,
+            }), 400
+ 
         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
             tmp.write(audio_bytes)
             temp_audio_path = tmp.name
+ 
     else:
         # Legacy multipart support
         if 'audio' not in request.files:
-            return jsonify({'message': 'Missing audio file in request', 'success': False}), 400
-
+            return jsonify({
+                'message': 'Missing audio file in request',
+                'success': False,
+            }), 400
+ 
         audio_file = request.files['audio']
         language = request.form.get('language') or None
-
+ 
         if language and language not in valid_languages:
             return jsonify({
                 'message': f'Invalid language code. Must be one of: {", ".join(valid_languages)}',
-                'success': False
+                'success': False,
             }), 400
-
+ 
         filename = audio_file.filename or 'audio.m4a'
         dot = filename.rfind('.')
         ext = filename[dot + 1:].lower() if dot >= 0 else 'm4a'
-
-        print(f"🎤 Transcription request received (multipart):")
+ 
+        print(f"🎤 Transcription request (multipart):")
         print(f"   - Filename: {filename}, Format: {ext}")
         print(f"   - Language: {language if language else 'auto-detect'}")
-
+ 
         with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}') as tmp:
             audio_file.save(tmp.name)
             temp_audio_path = tmp.name
-
-    # Call Whisper directly (blocking). The streaming/keep-alive approach caused
-    # http.post() on Android to hang because the chunked response never closed
-    # cleanly. A plain blocking call + Connection:close avoids this entirely.
-    # On a local network, NAT idle-timeout is not a concern.
+ 
+    # ── 2. Call Whisper API ──────────────────────────────────────────
     try:
         client = get_openai_client()
-        print("🔍 Sending audio to OpenAI Whisper API...")
+        file_size = os.path.getsize(temp_audio_path)
+        print(f"🔍 Sending {file_size} bytes to OpenAI Whisper API...")
+ 
+        import time as _time
+        whisper_start = _time.time()
+ 
         with open(temp_audio_path, 'rb') as f:
             resp = client.audio.transcriptions.create(
                 model="whisper-1",
@@ -2030,33 +2180,109 @@ def transcribe_audio():
                 language=language,
                 response_format="text",
             )
+ 
+        whisper_elapsed = _time.time() - whisper_start
+        print(f"⏱ Whisper API responded in {whisper_elapsed:.1f}s")
+ 
         transcript_text = str(resp).strip()
+ 
         if not transcript_text:
-            result = jsonify({'message': 'Empty transcript received from API', 'success': False})
+            result = jsonify({
+                'message': 'Whisper returned an empty transcript. '
+                           'Audio may be silent, too noisy, or in an unsupported format.',
+                'success': False,
+            })
             result.status_code = 422
         else:
-            print(f"✅ Transcription successful: {len(transcript_text)} characters")
-            result = jsonify({'transcript': transcript_text, 'success': True})
+            print(f"✅ Transcription successful: {len(transcript_text)} chars in {whisper_elapsed:.1f}s")
+            result = jsonify({
+                'transcript': transcript_text,
+                'success': True,
+            })
+ 
     except Exception as exc:
         error_msg = str(exc)
         print(f"❌ Whisper API Error: {error_msg}")
-        if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
-            result = jsonify({'message': 'OpenAI API key issue. Check OPENAI_API_KEY in .env.', 'success': False, 'error': 'API_KEY_ERROR'})
-        elif 'quota' in error_msg.lower():
-            result = jsonify({'message': 'OpenAI API quota exceeded. Check account billing.', 'success': False, 'error': 'QUOTA_ERROR'})
+ 
+        if 'api key' in error_msg.lower() or 'authentication' in error_msg.lower() \
+                or '401' in error_msg or '403' in error_msg:
+            result = jsonify({
+                'message': 'OpenAI API key is invalid or expired. '
+                           'Check OPENAI_API_KEY in .env and ensure billing is active.',
+                'success': False,
+                'error': 'API_KEY_ERROR',
+            })
+        elif 'quota' in error_msg.lower() or 'insufficient_quota' in error_msg.lower() \
+                or '429' in error_msg:
+            result = jsonify({
+                'message': 'OpenAI API quota exceeded or rate limited. '
+                           'Check billing at https://platform.openai.com/account/billing.',
+                'success': False,
+                'error': 'QUOTA_ERROR',
+            })
+        elif 'invalid file format' in error_msg.lower() or 'could not process' in error_msg.lower():
+            result = jsonify({
+                'message': 'Audio format not supported by Whisper. '
+                           'Supported: mp3, mp4, m4a, wav, webm, mpeg, mpga, oga, ogg, flac.',
+                'success': False,
+                'error': 'FORMAT_ERROR',
+            })
+        elif 'connection' in error_msg.lower() or 'timeout' in error_msg.lower():
+            result = jsonify({
+                'message': 'Could not reach OpenAI API. Check your server\'s internet connection.',
+                'success': False,
+                'error': 'CONNECTION_ERROR',
+            })
         else:
-            result = jsonify({'message': f'Whisper API error: {error_msg}', 'success': False, 'error': 'WHISPER_ERROR'})
+            result = jsonify({
+                'message': f'Whisper API error: {error_msg[:300]}',
+                'success': False,
+                'error': 'WHISPER_ERROR',
+            })
         result.status_code = 500
+ 
     finally:
         try:
             if os.path.exists(temp_audio_path):
                 os.unlink(temp_audio_path)
         except Exception as cleanup_err:
             print(f"Warning: Could not delete temp file: {cleanup_err}")
-
+ 
     result.headers['Connection'] = 'close'
     return result
+ 
+ 
+## ============================================================
+## DIAGNOSTIC ENDPOINT — Add this to your backend
+## Hit GET /api/transcribe/test to verify Whisper works
+## ============================================================
+ 
+@app.route('/api/transcribe/test', methods=['GET'])
+def test_transcribe():
+    """
+    Diagnostic endpoint to verify OpenAI Whisper connectivity.
+    Call from browser: http://192.168.137.1:5000/api/transcribe/test
+    """
+    diagnostics = {
+        'openai_key_set': bool(os.getenv('OPENAI_API_KEY', '').strip()),
+        'openai_key_prefix': os.getenv('OPENAI_API_KEY', '')[:8] + '...' if os.getenv('OPENAI_API_KEY', '') else 'MISSING',
+    }
 
+    # Quick connectivity test: list models (very cheap API call)
+    try:
+        client = get_openai_client()
+        # Just try a minimal API call to verify the key works
+        models = client.models.list()
+        whisper_available = any('whisper' in m.id for m in models.data)
+        diagnostics['api_key_valid'] = True
+        diagnostics['whisper_model_available'] = whisper_available
+        diagnostics['status'] = 'ready' if whisper_available else 'whisper model not found'
+    except Exception as e:
+        diagnostics['api_key_valid'] = False
+        diagnostics['error'] = str(e)[:200]
+        diagnostics['status'] = 'error'
+
+    return jsonify(diagnostics), 200 if diagnostics.get('api_key_valid') else 500
 
 def is_english_only(text):
     """Reject only if the ENTIRE query is non-Latin script (Arabic, Urdu, CJK, etc.).
@@ -3498,5 +3724,5 @@ if __name__ == '__main__':
     HOTSPOT_IP = '192.168.137.1'
     print(f" * Android devices connect via: http://{HOTSPOT_IP}:5000")
     print("=" * 50 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False, use_debugger=False)
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
 
