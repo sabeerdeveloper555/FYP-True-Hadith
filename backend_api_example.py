@@ -62,9 +62,18 @@ except (ImportError, OSError) as e:
 load_dotenv(override=True)
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Flutter app
+CORS(app, origins=[
+    "http://192.168.137.1:5000",
+    "http://192.168.100.12:5000",
+    "http://10.0.2.2:5000",
+    "http://localhost:5000"
+])  
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB for audio uploads
-
+@app.after_request
+def hide_server_info(response):
+    response.headers.pop('Server', None)
+    response.headers.pop('X-Powered-By', None)
+    return response
 # Database configuration
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'DB_HOST'),

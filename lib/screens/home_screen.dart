@@ -174,8 +174,7 @@ class _HomeScreenState extends State<HomeScreen>
                 }
                 _lastWords = newText;
 
-                final textDirection =
-                    _getTextDirection(_searchController.text);
+                final textDirection = _getTextDirection(_searchController.text);
                 if (textDirection == ui.TextDirection.rtl) {
                   _searchController.selection =
                       const TextSelection.collapsed(offset: 0);
@@ -197,8 +196,7 @@ class _HomeScreenState extends State<HomeScreen>
                 }
                 _lastWords = partialText;
 
-                final textDirection =
-                    _getTextDirection(_searchController.text);
+                final textDirection = _getTextDirection(_searchController.text);
                 if (textDirection == ui.TextDirection.rtl) {
                   _searchController.selection =
                       const TextSelection.collapsed(offset: 0);
@@ -250,7 +248,8 @@ class _HomeScreenState extends State<HomeScreen>
                     const SizedBox(width: 10),
                     _voiceLangButton(ctx, 'اردو', 'ur-PK', Icons.translate),
                     const SizedBox(width: 10),
-                    _voiceLangButton(ctx, 'العربية', 'ar-SA', Icons.text_fields),
+                    _voiceLangButton(
+                        ctx, 'العربية', 'ar-SA', Icons.text_fields),
                   ],
                 ),
               ],
@@ -294,8 +293,7 @@ class _HomeScreenState extends State<HomeScreen>
                 label,
                 style: TextStyle(
                   fontSize: 13,
-                  fontWeight:
-                      isSelected ? FontWeight.w600 : FontWeight.normal,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
                   color: isSelected
                       ? colorScheme.primary
                       : colorScheme.onSurfaceVariant,
@@ -398,7 +396,8 @@ class _HomeScreenState extends State<HomeScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              const SizedBox(height: 16),
+              const Spacer(flex: 2), // ← upar kam space
+
               // Logo
               Center(
                 child: Image.asset(
@@ -444,9 +443,11 @@ class _HomeScreenState extends State<HomeScreen>
                 'Browse and search authentic Hadith collections.',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
               ),
+
+              const Spacer(flex: 4), // ← neeche zyada space
             ],
           ),
         ),
@@ -469,7 +470,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Widget _buildSearchBar(BuildContext context, bool isDark) {
     final colorScheme = Theme.of(context).colorScheme;
-    
+
     return Container(
       decoration: BoxDecoration(
         color: colorScheme.surface,
@@ -511,7 +512,8 @@ class _HomeScreenState extends State<HomeScreen>
                     enabledBorder: InputBorder.none,
                     focusedBorder: InputBorder.none,
                     filled: false,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 12),
                   ),
                   onChanged: (value) => setState(() {}),
                   onSubmitted: (value) {
@@ -542,7 +544,8 @@ class _HomeScreenState extends State<HomeScreen>
                     color: _isListening ? Colors.red : colorScheme.primary,
                   ),
                   onPressed: _toggleListening,
-                  tooltip: _isListening ? 'Stop listening' : 'Start voice search',
+                  tooltip:
+                      _isListening ? 'Stop listening' : 'Start voice search',
                 ),
               );
             },
@@ -608,7 +611,8 @@ class _HomeScreenState extends State<HomeScreen>
                         if (mounted) {
                           ScaffoldMessenger.of(parentContext).showSnackBar(
                             const SnackBar(
-                              content: Text('Camera permission is required to scan hadith.'),
+                              content: Text(
+                                  'Camera permission is required to scan hadith.'),
                               backgroundColor: Colors.red,
                             ),
                           );
@@ -653,7 +657,9 @@ class _HomeScreenState extends State<HomeScreen>
                                 builder: (dialogContext) => PopScope(
                                   canPop: false,
                                   child: AlertDialog(
-                                    backgroundColor: Theme.of(dialogContext).colorScheme.surface,
+                                    backgroundColor: Theme.of(dialogContext)
+                                        .colorScheme
+                                        .surface,
                                     content: Column(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
@@ -664,7 +670,9 @@ class _HomeScreenState extends State<HomeScreen>
                                           textAlign: TextAlign.center,
                                           style: TextStyle(
                                             fontSize: 16,
-                                            color: Theme.of(dialogContext).colorScheme.onSurface,
+                                            color: Theme.of(dialogContext)
+                                                .colorScheme
+                                                .onSurface,
                                           ),
                                         ),
                                         const SizedBox(height: 8),
@@ -672,7 +680,9 @@ class _HomeScreenState extends State<HomeScreen>
                                           'This may take 30-60 seconds\nPlease wait...',
                                           style: TextStyle(
                                             fontSize: 12,
-                                            color: Theme.of(dialogContext).colorScheme.onSurfaceVariant,
+                                            color: Theme.of(dialogContext)
+                                                .colorScheme
+                                                .onSurfaceVariant,
                                           ),
                                           textAlign: TextAlign.center,
                                         ),
@@ -858,7 +868,9 @@ class _HomeScreenState extends State<HomeScreen>
                                 builder: (dialogContext) => PopScope(
                                   canPop: false,
                                   child: AlertDialog(
-                                    backgroundColor: Theme.of(dialogContext).colorScheme.surface,
+                                    backgroundColor: Theme.of(dialogContext)
+                                        .colorScheme
+                                        .surface,
                                     content: Column(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
@@ -869,7 +881,9 @@ class _HomeScreenState extends State<HomeScreen>
                                           textAlign: TextAlign.center,
                                           style: TextStyle(
                                             fontSize: 16,
-                                            color: Theme.of(dialogContext).colorScheme.onSurface,
+                                            color: Theme.of(dialogContext)
+                                                .colorScheme
+                                                .onSurface,
                                           ),
                                         ),
                                         const SizedBox(height: 8),
@@ -877,7 +891,9 @@ class _HomeScreenState extends State<HomeScreen>
                                           'This may take 30-60 seconds\nPlease wait...',
                                           style: TextStyle(
                                             fontSize: 12,
-                                            color: Theme.of(dialogContext).colorScheme.onSurfaceVariant,
+                                            color: Theme.of(dialogContext)
+                                                .colorScheme
+                                                .onSurfaceVariant,
                                           ),
                                           textAlign: TextAlign.center,
                                         ),
@@ -1039,8 +1055,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   // ── Audio file picking ────────────────────────────────────────────────────
 
-  static const _waChannel =
-      MethodChannel('com.example.true_hadith/whatsapp');
+  static const _waChannel = MethodChannel('com.example.true_hadith/whatsapp');
 
   Future<void> _pickAudioFile(BuildContext parentContext) async {
     // Request audio/storage permission before querying MediaStore
@@ -1076,9 +1091,8 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final raw = await _waChannel.invokeMethod<List>('getVoiceNotes');
       if (raw != null) {
-        voiceNotes = raw
-            .map((e) => Map<String, dynamic>.from(e as Map))
-            .toList();
+        voiceNotes =
+            raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
       }
     } catch (_) {}
 
@@ -1441,7 +1455,9 @@ class HomeDrawer extends StatelessWidget {
                 ListTile(
                   leading: Icon(
                     isDark ? Icons.dark_mode_rounded : Icons.light_mode_rounded,
-                    color: isDark ? AppColors.accentGold : colorScheme.onSurfaceVariant,
+                    color: isDark
+                        ? AppColors.accentGold
+                        : colorScheme.onSurfaceVariant,
                   ),
                   title: Text(
                     isDark ? 'Dark Mode' : 'Light Mode',

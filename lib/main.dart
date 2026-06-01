@@ -67,6 +67,7 @@ Future<void> main() async {
     // Remove native splash and show Flutter immediately.
     // TranslationService init runs in the background — the SplashScreen
     // animation (~4 s) gives it ample time to finish.
+    await OnboardingService.resetOnboarding(); // TEMP: reset for testing
     FlutterNativeSplash.remove();
     runApp(const MyApp());
     TranslationService.instance.init().catchError(
@@ -242,6 +243,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
   UserModel? _userData;
   bool _isLoading = true;
   bool _showOnboarding = false;
+  bool _onboardingChecked = false;
   StreamSubscription<User?>? _authSubscription;
   StreamSubscription<Uri>? _linkSubscription;
 
@@ -252,8 +254,10 @@ class _AuthWrapperState extends State<AuthWrapper> {
     // Check onboarding status first
     _checkOnboardingStatus();
 
-    // Listen to Firebase auth state
+    // Listen to Firebase auth state — but only act after the onboarding
+    // check has completed, to avoid a race that skips onboarding.
     _authSubscription = AuthService.authStateChanges.listen((user) {
+      if (!_onboardingChecked) return;
       if (user != null) {
         _loadUserData();
       } else {
@@ -318,11 +322,15 @@ class _AuthWrapperState extends State<AuthWrapper> {
   Future<void> _checkOnboardingStatus() async {
     final onboardingCompleted = await OnboardingService.isOnboardingCompleted();
 
+    _onboardingChecked = true;
+
     if (!onboardingCompleted) {
-      setState(() {
-        _showOnboarding = true;
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _showOnboarding = true;
+          _isLoading = false;
+        });
+      }
     } else {
       await _checkAuthState();
     }
