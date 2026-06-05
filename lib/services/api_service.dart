@@ -78,6 +78,37 @@ class ApiService {
     }
   }
 
+  /// Upload a profile photo image to the Flask backend.
+  /// Returns the public URL of the saved image.
+  static Future<String> uploadProfilePhoto({
+    required int userId,
+    required List<int> imageBytes,
+    String imageFormat = 'jpg',
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse('$baseUrl/user/upload-profile-photo'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'user_id': userId,
+          'image': base64Encode(imageBytes),
+          'image_format': imageFormat,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['url'] as String;
+      } else {
+        final error = jsonDecode(response.body);
+        throw Exception(error['message'] ?? 'Upload failed');
+      }
+    } catch (e) {
+      if (e is Exception) rethrow;
+      throw Exception('Network error: ${e.toString()}');
+    }
+  }
+
   static Future<UserModel> updateProfilePhoto({
     required int userId,
     required String profilePhotoUrl,

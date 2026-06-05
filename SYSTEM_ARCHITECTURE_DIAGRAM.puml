@@ -1,0 +1,134 @@
+@startuml True Hadith - System Architecture Diagram
+
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Arial"
+skinparam defaultFontSize 11
+skinparam roundCorner 0
+skinparam linetype ortho
+skinparam nodesep 35
+skinparam ranksep 45
+
+skinparam rectangle {
+    BackgroundColor #FFFFFF
+    BorderColor     #000000
+    FontColor       #000000
+    BorderThickness 1
+}
+
+skinparam arrow {
+    Color     #000000
+    Thickness 1
+    FontSize  9
+    FontColor #333333
+}
+
+skinparam note {
+    BackgroundColor #FFFFFF
+    BorderColor     #000000
+    FontColor       #333333
+    FontSize        9
+}
+
+top to bottom direction
+
+' ─────────────────────────────────────────────
+' MOBILE APPLICATION FLUTTER
+' ─────────────────────────────────────────────
+rectangle "**Mobile Application Flutter**" as MOBILE {
+
+    rectangle "UI Screens\n(Home, Search, Results, History, Bookmarks, Chatbot)" as UI
+
+    rectangle "Flutter Services\n(ApiService, AuthService, OCRService,\nTranscriptionService, TranslationService)" as FSVC
+
+    rectangle "Deep Link Handler\n(app_links — intercepts password-reset URI,\npushes ResetPasswordScreen on valid oobCode)" as DLH
+
+    UI   -down-> FSVC
+}
+
+' ─────────────────────────────────────────────
+' BACKEND SERVER
+' ─────────────────────────────────────────────
+rectangle "**Backend Server (Flask)**" as BACKEND {
+
+    rectangle "Flask REST API" as FAPI
+
+    rectangle "Authentication Module" as AMOD
+
+    rectangle "Hadith Verification Logic\n(NLP + Semantic Search)" as HVL
+
+    FAPI -right-> AMOD
+    FAPI -down->  HVL
+}
+
+' ─────────────────────────────────────────────
+' AI & PROCESSING SERVICES
+' ─────────────────────────────────────────────
+rectangle "**AI & Processing Services**" as AI {
+
+    rectangle "OCR Engine\n(Tesseract / EasyOCR)" as OCR
+
+    rectangle "Speech-to-text Engine" as STT
+
+    rectangle "OpenAI API\n(RAG + NLP)" as OAPI
+
+    rectangle "FAISS Vector Store\n(sentence-embedding index\nfor semantic hadith retrieval)" as FAISS
+
+    OAPI  -down-> FAISS
+    FAISS -left-> STT
+}
+
+' ─────────────────────────────────────────────
+' DATA & CLOUD SERVICES
+' ─────────────────────────────────────────────
+rectangle "**Data & Cloud Services**" as DATA {
+
+    rectangle "Firebase Authentication" as FBAUTH
+
+    rectangle "PostgreSQL Database\n(Hadith, History, Bookmark)" as PG
+
+    rectangle "Firebase Storage\n(Profile Images)" as FBSTORE
+
+    rectangle "Google Cloud Translation API" as GTRANS
+}
+
+' ─────────────────────────────────────────────
+' CONNECTIONS BETWEEN GROUPS
+' ─────────────────────────────────────────────
+
+' Mobile → Backend
+FSVC -down-> FAPI
+DLH  -down-> FAPI  : password-reset\ndeep link
+
+' Mobile → Data & Cloud
+FSVC -right-> FBAUTH
+FSVC -right-> FBSTORE
+FSVC -right-> GTRANS
+
+' Backend → AI
+HVL -left-> OCR
+HVL -left-> OAPI
+
+' Backend → Data
+HVL   -right-> PG
+AMOD  -right-> FBAUTH
+
+' ─────────────────────────────────────────────
+' NOTES
+' ─────────────────────────────────────────────
+note bottom of FSVC
+  TranslationService lazy-init:
+  fires after runApp(), runs during
+  SplashScreen animation (~4 s).
+  Google Cloud Translation API called
+  only when user requests translation.
+end note
+
+note bottom of FAISS
+  Separate from PostgreSQL.
+  Stores vector embeddings.
+  Search hits FAISS first,
+  then fetches rows from PG
+  by hadith_id.
+end note
+
+@enduml

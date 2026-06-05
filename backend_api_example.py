@@ -39,14 +39,6 @@ except ImportError:
     BM25_AVAILABLE = False
     print("Warning: rank_bm25 not installed. BM25 hybrid search disabled. Install with: pip install rank-bm25")
 
-try:
-    import firebase_admin
-    from firebase_admin import credentials, messaging as fcm_messaging
-    FIREBASE_ADMIN_AVAILABLE = True
-except ImportError:
-    FIREBASE_ADMIN_AVAILABLE = False
-    print("Warning: firebase-admin not installed. Push notifications disabled. Install with: pip install firebase-admin")
-
 # Fix Unicode encoding for Windows console
 if sys.platform == 'win32':
     import codecs
@@ -115,115 +107,6 @@ def get_openai_client():
             raise ValueError("OPENAI_API_KEY environment variable is not set")
         _openai_client = OpenAI(api_key=api_key)
     return _openai_client
-
-
-_firebase_app = None
-
-def get_firebase_app():
-    """Initialize Firebase Admin SDK once and reuse the app instance."""
-    global _firebase_app
-    if _firebase_app is not None:
-        return _firebase_app
-    if not FIREBASE_ADMIN_AVAILABLE:
-        return None
-
-    sa_path = os.getenv('FIREBASE_SERVICE_ACCOUNT_PATH', '')
-    if not sa_path or not os.path.exists(sa_path):
-        print(f"⚠ Firebase Admin: service account file not found at '{sa_path}'")
-        print("  Download it from Firebase Console → Project Settings → Service Accounts")
-        return None
-
-    try:
-        cred = credentials.Certificate(sa_path)
-        _firebase_app = firebase_admin.initialize_app(cred)
-        print("✓ Firebase Admin SDK initialized")
-        return _firebase_app
-    except Exception as e:
-        print(f"✗ Firebase Admin SDK init failed: {e}")
-        return None
-
-
-def send_push_notification(fcm_token, title, body, data=None):
-    """
-    Send a push notification to a single device.
-    Returns True on success, False on failure.
-    Runs synchronously — call from a background thread if inside a request handler.
-    """
-    if not get_firebase_app():
-        return False
-
-    try:
-        message = fcm_messaging.Message(
-            notification=fcm_messaging.Notification(title=title, body=body),
-            # data values must all be strings
-            data={str(k): str(v) for k, v in (data or {}).items()},
-            token=fcm_token,
-            android=fcm_messaging.AndroidConfig(
-                priority='high',
-                notification=fcm_messaging.AndroidNotification(
-                    channel_id='true_hadith_main',
-                    sound='default',
-                ),
-            ),
-            apns=fcm_messaging.APNSConfig(
-                payload=fcm_messaging.APNSPayload(
-                    aps=fcm_messaging.Aps(sound='default', badge=1)
-                )
-            ),
-        )
-        response = fcm_messaging.send(message)
-        print(f"✓ Push notification sent: {response}")
-        return True
-    except fcm_messaging.UnregisteredError:
-        # Token is stale — clear it so we don't keep sending to dead tokens
-        print(f"⚠ FCM token unregistered, clearing from DB: {fcm_token[:20]}...")
-        _clear_stale_fcm_token(fcm_token)
-        return False
-    except Exception as e:
-        print(f"✗ Push notification failed: {e}")
-        return False
-
-
-def _clear_stale_fcm_token(token):
-    """Remove an expired FCM token from the database."""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET fcm_token = NULL WHERE fcm_token = %s", (token,))
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        print(f"✗ Could not clear stale FCM token: {e}")
-        if conn:
-            conn.close()
-
-
-def send_notification_to_user(user_id, title, body, data=None):
-    """
-    Look up a user's stored FCM token and send them a push notification.
-    Safe to call from a background thread.
-    """
-    conn = None
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT fcm_token FROM users WHERE user_id = %s", (user_id,))
-        row = cursor.fetchone()
-        cursor.close()
-        conn.close()
-
-        if not row or not row.get('fcm_token'):
-            print(f"⚠ No FCM token for user_id={user_id}, skipping notification")
-            return False
-
-        return send_push_notification(row['fcm_token'], title, body, data)
-    except Exception as e:
-        print(f"✗ send_notification_to_user error: {e}")
-        if conn:
-            conn.close()
-        return False
 
 
 def load_faiss_indexes():
@@ -1037,17 +920,6 @@ def search_hadiths():
             fs = final_score(r)
             r['similarity_score'] = round(max(0.0, min(1.0, 1.0 - fs)), 4)
 
-        # Notify user of results (handy if they minimised the app during a slow search)
-        if user_id and results:
-            count = len(results)
-            threading.Thread(
-                target=send_notification_to_user,
-                args=(user_id, 'Search Complete',
-                      f'Found {count} hadith{"s" if count != 1 else ""} for "{query[:40]}"'),
-                kwargs={'data': {'type': 'search'}},
-                daemon=True
-            ).start()
-
         return jsonify({'results': results}), 200
 
     except Exception as e:
@@ -1217,50 +1089,62 @@ def delete_profile_photo():
         return jsonify({'message': f'Delete failed: {str(e)}'}), 500
 
 
-@app.route('/api/user/fcm-token', methods=['POST'])
-def register_fcm_token():
+PROFILE_PHOTOS_DIR = os.path.join('static', 'profile_photos')
+
+
+@app.route('/api/user/upload-profile-photo', methods=['POST'])
+def upload_profile_photo():
     """
-    Store or refresh the FCM device token for push notifications.
+    Upload a profile photo for a user. Saves the image to the server's
+    static/profile_photos/ folder and returns the accessible URL.
 
     Expected JSON body:
     {
         "user_id": int,
-        "fcm_token": "string"
+        "image": "base64_encoded_image_string",
+        "image_format": "jpg"  (optional, default "jpg")
+    }
+
+    Returns:
+    {
+        "url": "http://<host>/static/profile_photos/user_<id>.jpg"
     }
     """
-    conn = None
-    cursor = None
     try:
         data = request.get_json()
         if not data:
             return jsonify({'message': 'No data provided'}), 400
 
         user_id = data.get('user_id')
-        fcm_token = data.get('fcm_token')
+        image_base64 = data.get('image')
+        image_format = (data.get('image_format', 'jpg') or 'jpg').lower().lstrip('.')
 
-        if not user_id or not fcm_token:
-            return jsonify({'message': 'Missing user_id or fcm_token'}), 400
+        if not user_id:
+            return jsonify({'message': 'Missing user_id'}), 400
+        if not image_base64:
+            return jsonify({'message': 'Missing image data'}), 400
+        if image_format not in ('jpg', 'jpeg', 'png', 'webp'):
+            image_format = 'jpg'
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET fcm_token = %s WHERE user_id = %s",
-            (fcm_token, user_id)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+        try:
+            image_bytes = base64.b64decode(image_base64)
+        except Exception:
+            return jsonify({'message': 'Invalid base64 image data'}), 400
 
-        return jsonify({'message': 'FCM token registered'}), 200
+        os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
+
+        # Fixed filename per user so uploading a new photo replaces the old one
+        filename = f'user_{user_id}.{image_format}'
+        filepath = os.path.join(PROFILE_PHOTOS_DIR, filename)
+
+        with open(filepath, 'wb') as f:
+            f.write(image_bytes)
+
+        url = f'{request.scheme}://{request.host}/static/profile_photos/{filename}'
+        return jsonify({'url': url}), 200
 
     except Exception as e:
-        if conn:
-            conn.rollback()
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-        return jsonify({'message': f'Failed to register token: {str(e)}'}), 500
+        return jsonify({'message': f'Upload failed: {str(e)}'}), 500
 
 
 @app.route('/api/health', methods=['GET'])
@@ -3577,16 +3461,6 @@ Respond with ONLY a JSON object in this exact format (no markdown, no code block
         total_elapsed = time.time() - request_start_time
         print(f"[RAG] Total request time: {total_elapsed:.2f} seconds")
 
-        # Push notification — useful when the user minimises the app while the
-        # chatbot is thinking (requests can take up to 60 s).
-        preview = bot_reply[:80] + '…' if len(bot_reply) > 80 else bot_reply
-        threading.Thread(
-            target=send_notification_to_user,
-            args=(user_id, 'True Hadith AI replied', preview),
-            kwargs={'data': {'type': 'chat', 'conversation_id': str(conversation_id)}},
-            daemon=True
-        ).start()
-
         return _make_chat_response({
             'conversation_id': conversation_id,
             'reply': bot_reply,
@@ -3650,9 +3524,6 @@ Respond with ONLY a JSON object in this exact format (no markdown, no code block
 print("\n" + "=" * 50)
 print("Initializing backend...")
 print("=" * 50)
-
-# Initialize Firebase Admin SDK for push notifications
-get_firebase_app()
 
 # Load FAISS indexes and mappings
 print("Loading FAISS indexes and mapping files...")
