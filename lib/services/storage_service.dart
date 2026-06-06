@@ -7,14 +7,18 @@ class StorageService {
   static final ImagePicker _picker = ImagePicker();
 
   /// Pick an image from gallery or camera
-  static Future<File?> pickImage(
-      {ImageSource source = ImageSource.gallery}) async {
+  static Future<File?> pickImage({
+    ImageSource source = ImageSource.gallery,
+    int imageQuality = 85,
+    double maxWidth = 1024,
+    double maxHeight = 1024,
+  }) async {
     try {
       final XFile? image = await _picker.pickImage(
         source: source,
-        imageQuality: 85,
-        maxWidth: 1024,
-        maxHeight: 1024,
+        imageQuality: imageQuality,
+        maxWidth: maxWidth,
+        maxHeight: maxHeight,
       );
 
       if (image != null) {

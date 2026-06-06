@@ -170,7 +170,12 @@ class _ProfilePhotoWidgetState extends State<ProfilePhotoWidget> {
       setState(() => _isUploading = true);
 
       // Pick image
-      final File? imageFile = await StorageService.pickImage(source: source);
+      final File? imageFile = await StorageService.pickImage(
+        source: source,
+        imageQuality: 60,
+        maxWidth: 400,
+        maxHeight: 400,
+      );
       if (imageFile == null) {
         setState(() => _isUploading = false);
         return;
