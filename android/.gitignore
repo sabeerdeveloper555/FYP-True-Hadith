@@ -12,3 +12,17 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+
+# Signing / secrets
+android/key.properties
+android/upload-keystore.jks
+**/upload-keystore.jks
+*.jks
+*.keystore
+
+# Firebase config (optional, par recommended)
+android/app/google-services.json
+
+# Build output
+build/
+.dart_tool/
