@@ -18,7 +18,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.true_hadith"
+    namespace = "org.truehadith.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 

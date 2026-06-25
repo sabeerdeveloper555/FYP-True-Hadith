@@ -1,5 +1,4 @@
-package com.example.true_hadith
-
+package org.truehadith.app
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
