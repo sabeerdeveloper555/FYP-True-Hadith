@@ -70,7 +70,7 @@ class UrlHandler {
     try {
       final uri = Uri.parse(url);
       final mode = uri.queryParameters['mode'];
-
+      
       // Check for mode parameter (Firebase's default format)
       if (mode == 'resetPassword') {
         return true;

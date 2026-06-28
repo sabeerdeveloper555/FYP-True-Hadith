@@ -29,6 +29,7 @@ import 'core/theme/app_theme_dark.dart';
 import 'screens/reset_password_screen.dart';
 import 'screens/translations_page.dart';
 import 'services/translation_service.dart';
+import 'utils/url_handler.dart';
 
 Future<void> main() async {
   final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
@@ -287,28 +288,32 @@ class _AuthWrapperState extends State<AuthWrapper> {
   }
 
   void _handleDeepLink(Uri uri) {
-    debugPrint('🔗 Deep link received: $uri');
+    final urlString = uri.toString();
+    debugPrint('🔗 Deep link received: $urlString');
 
-    String? oobCode;
-
-    if (uri.scheme == 'truehadith' && uri.host == 'reset-password') {
-      // Custom scheme: truehadith://reset-password?oobCode=...
-      oobCode = uri.queryParameters['oobCode'];
-    } else if (uri.scheme == 'https' &&
-        uri.path.contains('/__/auth/action') &&
-        uri.queryParameters['mode'] == 'resetPassword') {
-      // Firebase HTTPS action link intercepted via App Links
-      oobCode = uri.queryParameters['oobCode'];
-    }
-
-    if (oobCode != null && oobCode.isNotEmpty) {
-      debugPrint('✅ Password reset action code detected: $oobCode');
-      final code = oobCode;
-      MyApp.navigatorKey.currentState?.push(
-        MaterialPageRoute(
-          builder: (_) => ResetPasswordScreen(actionCode: code),
-        ),
-      );
+    // 1. UrlHandler se check karein ke kya yeh password reset URL hai
+    if (UrlHandler.isPasswordResetUrl(urlString)) {
+      // 2. oobCode extract karein
+      final oobCode = UrlHandler.extractActionCodeFromUrl(urlString);
+      
+      if (oobCode != null && oobCode.isNotEmpty) {
+        debugPrint('✅ Password reset action code detected: $oobCode');
+        
+        // WidgetsBinding lagane se Flutter pehle UI structure ko settle karega,
+        // jis se LoginScreen ka force redirect isko override nahi kar payega.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          MyApp.navigatorKey.currentState?.pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: (_) => ResetPasswordScreen(actionCode: oobCode),
+            ),
+            (route) => route.isFirst, // Purane saare overlays clear kar dega
+          );
+        });
+      } else {
+        debugPrint('❌ URL valid hai par oobCode nahi mila');
+      }
+    } else {
+      debugPrint('❌ Yeh password reset URL nahi hai');
     }
   }
 

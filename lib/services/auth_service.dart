@@ -108,7 +108,21 @@ class AuthService {
   /// so the link opens the app directly via the custom URL scheme.
   static Future<void> sendPasswordResetEmail(String email) async {
     try {
-      await _auth.sendPasswordResetEmail(email: email);
+      final ActionCodeSettings actionCodeSettings = ActionCodeSettings(
+        // 1. URL bilkul clean hona chahiye jo Firebase console mein authorized hai
+        url: 'https://true-hadith-e3f19.firebaseapp.com',
+        handleCodeInApp: true,
+        // 2. Apne android/app/build.gradle wala exact applicationId check karein
+        // Agar aapka package name 'com.example.truehadith' ki jagah kuch aur hai (jaise com.truehadith.app), toh wahi likhein
+        androidPackageName: 'org.truehadith.app',
+        androidMinimumVersion: '1',
+        androidInstallApp: true,
+      );
+
+      await _auth.sendPasswordResetEmail(
+        email: email,
+        actionCodeSettings: actionCodeSettings,
+      );
     } on FirebaseAuthException catch (e) {
       throw Exception(_getFirebaseErrorMessage(e.code, e.message));
     } catch (e) {
