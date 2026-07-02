@@ -36,14 +36,19 @@ class _ResultPageState extends State<ResultPage> {
     'Jami-at-Tirmizi': ['tirmidhi', 'tirmizi'],
   };
 
-  static const double _accurateThreshold = 0.70;
   static const double _slightThreshold = 0.45;
+  // Absolute cosine-similarity cutoffs (e.g. score >= 0.70) are rarely reached by
+  // paraphrased hadith text, so "best match" is judged relative to this result set
+  // instead — whichever result(s) tie for the top score are shown green.
+  static const double _bestMatchTolerance = 0.001;
 
-  Color? _matchColor(HadithSummary h) {
+  Color? _matchColor(HadithSummary h, double? bestScore) {
     final score = h.similarityScore;
     if (score == null) return null;
-    if (score >= _accurateThreshold) return const Color(0xFF22C55E); // green
-    if (score >= _slightThreshold) return const Color(0xFFF59E0B);   // amber
+    if (bestScore != null && score >= bestScore - _bestMatchTolerance) {
+      return const Color(0xFF22C55E); // green — best match(es) in this result set
+    }
+    if (score >= _slightThreshold) return const Color(0xFFF59E0B); // amber
     return null; // no highlight for low/fuzzy-only results
   }
 
@@ -63,7 +68,13 @@ class _ResultPageState extends State<ResultPage> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final filtered = _filteredResults;
-    
+    final bestScore = filtered.isEmpty
+        ? null
+        : filtered
+            .map((r) => r.similarityScore)
+            .whereType<double>()
+            .fold<double?>(null, (max, s) => max == null || s > max ? s : max);
+
     return Scaffold(
       backgroundColor: ThemeColors.background(isDark),
       appBar: AppBar(
@@ -98,7 +109,7 @@ class _ResultPageState extends State<ResultPage> {
                         return HadithCard(
                           summary: item,
                           userId: widget.userId,
-                          highlightColor: _matchColor(item),
+                          highlightColor: _matchColor(item, bestScore),
                           onTap: () {
                             Navigator.pushNamed(
                               context,

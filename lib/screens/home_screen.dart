@@ -725,6 +725,7 @@ class _HomeScreenState extends State<HomeScreen>
                                                 offset: extractedText.length);
                                       }
                                     });
+                                    _searchFocusNode.requestFocus();
                                     WidgetsBinding.instance
                                         .addPostFrameCallback((_) {
                                       if (mounted) {
@@ -936,6 +937,7 @@ class _HomeScreenState extends State<HomeScreen>
                                                 offset: extractedText.length);
                                       }
                                     });
+                                    _searchFocusNode.requestFocus();
                                     WidgetsBinding.instance
                                         .addPostFrameCallback((_) {
                                       if (mounted) {

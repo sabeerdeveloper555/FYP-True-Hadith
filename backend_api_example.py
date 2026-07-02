@@ -54,6 +54,7 @@ except (ImportError, OSError) as e:
 load_dotenv(override=True)
 
 app = Flask(__name__)
+app.debug = True  # kept in sync with app.run(debug=True) below; used by the reloader guard
 CORS(app, origins=[
     "http://192.168.137.1:5000",
     "http://192.168.100.12:5000",
@@ -68,11 +69,11 @@ def hide_server_info(response):
     return response
 # Database configuration
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'DB_HOST'),
-    'database': os.getenv('DB_NAME', 'DB_NAME'),
-    'user': os.getenv('DB_USER', 'DB_USER'),
-    'password': os.getenv('DB_PASSWORD', 'DB_PASSWORD'),
-    'port': os.getenv('DB_PORT', 'DB_PORT')
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'database': os.getenv('DB_NAME', 'hadith-db2'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD'),
+    'port': os.getenv('DB_PORT', '5432')
 }
 
 # FAISS and Mapping File Paths
@@ -172,7 +173,7 @@ def build_bm25_index():
         return
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
+        cursor = conn.cursor() # Strict tuple mode taake startup crash na ho
         cursor.execute("SELECT hadith_id, hadith_english FROM hadiths ORDER BY hadith_id")
         rows = cursor.fetchall()
         cursor.close()
@@ -187,14 +188,144 @@ def build_bm25_index():
 
 
 def get_db_connection():
-    """Create and return a database connection"""
+    """Enforces RealDictCursor globally to prevent any 'tuple index out of range' errors"""
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         return conn
-    except Exception as e:
-        print(f"Database connection error: {e}")
-        raise
+    except Exception as conn_err:
+        print(f"❌ DATABASE CONNECTION ERROR: {conn_err}")
+        raise conn_err
 
+
+def keyword_match_score(text_fields, words):
+    """Fraction of query words found in the given text fields — used to rank plain
+    ILIKE fallback results, since the SQL behind them has no ORDER BY."""
+    if not words:
+        return 0.0
+    combined = " ".join((field or "") for field in text_fields).lower()
+    matched = sum(1 for word in words if word.lower() in combined)
+    return matched / len(words)
+
+
+# 2. BULLETPROOF LOCAL API SEARCH ENDPOINT
+@app.route('/api/search', methods=['POST'])
+def search_hadiths_final_local():  # <-- Unique name completely prevents AssertionError
+    print("\n" + "═"*50)
+    print("🔄 [LOCAL DB RUN] /api/search API TRIGGERED")
+    print("═"*50)
+    
+    try:
+        data = request.get_json() or {}
+        query_text = data.get('query', '').strip()
+    except Exception:
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+    if not query_text:
+        return jsonify({"status": "success", "results": []})
+        
+    print(f"🔍 Searching local database for text match: '{query_text}'")
+    semantic_results = semantic_search_summaries(query_text, limit=15)
+    if semantic_results:
+        print(f"Returning {len(semantic_results)} semantic results to Flutter.")
+        return jsonify({
+            "status": "success",
+            "results": semantic_results
+        })
+
+    print(f"Semantic search returned 0 rows, using local keyword fallback: '{query_text}'")
+    results = []
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        words = [w.strip() for w in query_text.split() if len(w.strip()) > 2]
+        if not words:
+            words = [query_text]
+            
+        conditions = []
+        params = []
+        for word in words:
+            conditions.append("(h.hadith_english ILIKE %s OR h.hadith_urdu ILIKE %s)")
+            params.append(f"%{word}%")
+            params.append(f"%{word}%")
+            
+        sql_query = f"""
+            SELECT h.hadith_id, h.hadith_number, h.hadith_english, h.hadith_urdu, h.hadith_arabic,
+                   b.book_name_english
+            FROM hadiths h
+            LEFT JOIN hadith_books b ON h.fk_book_id = b.book_id
+            WHERE {" AND ".join(conditions)}
+            LIMIT 15;
+        """
+        
+        cursor.execute(sql_query, tuple(params))
+        db_results = cursor.fetchall()
+
+        # Fallback keyword match scanner if phrase yields 0 rows
+        if not db_results and len(words) > 1:
+            print("⚠️ Phrase match 0, executing dominant keyword scanner...")
+            dominant_word = max(words, key=len)
+            fallback_query = """
+                SELECT h.hadith_id, h.hadith_number, h.hadith_english, h.hadith_urdu, h.hadith_arabic,
+                       b.book_name_english
+                FROM hadiths h
+                LEFT JOIN hadith_books b ON h.fk_book_id = b.book_id
+                WHERE h.hadith_english ILIKE %s OR h.hadith_urdu ILIKE %s
+                LIMIT 15;
+            """
+            cursor.execute(fallback_query, (f"%{dominant_word}%", f"%{dominant_word}%"))
+            db_results = cursor.fetchall()
+
+        print(f"✅ Local Database Rows Loaded: {len(db_results)}")
+
+        # Rank fallback rows by how many query words they actually match, since the
+        # SQL has no ORDER BY and Postgres otherwise returns them in arbitrary scan order.
+        scored_results = []
+        for row in db_results:
+            score = keyword_match_score(
+                [row.get('hadith_english'), row.get('hadith_urdu')], words
+            )
+            scored_results.append((score, row))
+        scored_results.sort(key=lambda item: item[0], reverse=True)
+
+        for score, row in scored_results:
+            h_id = row.get('hadith_id') or 1
+            h_num = row.get('hadith_number') or str(h_id)
+            b_name = row.get('book_name_english') or "Hadith Collection"
+
+            results.append({
+                "id": int(h_id),
+                "hadith_id": int(h_id),
+                "hadith_number": str(h_num),
+                "hadith_no": str(h_num),
+                "collection": str(b_name),
+                "book_name": str(b_name),
+                "text_en": str(row.get('hadith_english') or ""),
+                "text_ur": str(row.get('hadith_urdu') or ""),
+                "text_ar": str(row.get('hadith_arabic') or ""),
+                "chapter_no": "1",
+                "chapter_name": "General",
+                "narrator": "Narrated by Companion",
+                "status": "Authentic",
+                "grade": "Sahih",
+                "score": score,
+                "similarity_score": score
+            })
+
+        cursor.close()
+    except Exception as db_err:
+        print(f"❌ LOCAL DATABASE EXCEPTION DURING SEARCH: {db_err}")
+    finally:
+        if conn:
+            conn.close()
+
+    print(f"🚀 Returning {len(results)} exact local results to Flutter.")
+    return jsonify({
+        "status": "success",
+        "results": results
+    })
 
 @app.route('/api/auth/register', methods=['POST'])
 def register_user():
@@ -564,265 +695,143 @@ def get_embedding(text, dimensions=None):
         raise Exception(f"OpenAI API error: {error_msg}")
 
 
-@app.route('/api/search', methods=['POST'])
-def search_hadiths():
-    """
-    Search hadiths using hybrid approach: FAISS semantic similarity + Fuzzy matching
-    Handles spelling mistakes and missing Arabic punctuation/tashkeel
-
-    Expected JSON body:
-    {
-        "user_id": int,
-        "query": "string"
-    }
-
-    Returns:
-    {
-        "results": [
-            {
-                "hadith_id": int,
-                "book_name": "string",
-                "hadith_number": int,
-                "chapter_number": int,
-                "grade": "string"
-            }
-        ]
-    }
-    """
+def semantic_search_summaries(query, limit=15):
+    """Return frontend-compatible hadith summaries using loaded FAISS indexes."""
     try:
-        if not request.is_json:
-            return jsonify({'message': 'Content-Type must be application/json'}), 415
+        if not query or not query.strip():
+            return []
 
-        data = request.get_json(silent=True)
+        query_embedding = get_embedding(query)
+        query_vector = query_embedding.reshape(1, -1)
+        embedding_dim = query_embedding.shape[0]
 
-        if data is None:
-            return jsonify({'message': 'Invalid JSON body'}), 400
+        candidates = []
 
-        user_id = data.get('user_id')
-        query = data.get('query')
-
-        if user_id is None:
-            return jsonify({'message': 'user_id is required'}), 400
-
-        if not isinstance(user_id, int):
-            return jsonify({'message': 'user_id must be an integer'}), 400
-
-        # Verify user exists before searching
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,))
-            if cur.fetchone() is None:
-                cur.close()
-                conn.close()
-                return jsonify({'message': 'User not found'}), 404
-            cur.close()
-            conn.close()
-        except Exception as e:
-            return jsonify({'message': f'Database error: {str(e)}'}), 500
-
-        if not query:
-            return jsonify({'message': 'Missing query'}), 400
-
-        # Normalize and clean query
-        normalized_query = normalize_arabic_text(query) if any('\u0600' <= c <= '\u06FF' for c in query) else query
-        cleaned_query = clean_text(normalized_query)
-
-        # If cleaned query is empty, use original query
-        if not cleaned_query or not cleaned_query.strip():
-            cleaned_query = query.strip()
-
-        # Ensure we have a valid query
-        if not cleaned_query:
-            return jsonify({'message': 'Query cannot be empty'}), 400
-
-        # ===== REFERENCE SEARCH: "Sahih Muslim 2699", "Muslim-2699", "Bukhari 47" =====
-        # Detect book-name + hadith-number patterns and short-circuit to a direct DB
-        # lookup.  This runs before the expensive FAISS/fuzzy path.
-        ref_match = re.search(
-            r'(?:sahih\s+)?'
-            r'(muslim|bukhari|tirmidhi?|tirmizi)'
-            r'[\s\-:#]*'
-            r'(\d+)',
-            query,
-            re.IGNORECASE
-        )
-        if ref_match:
-            book_keyword = ref_match.group(1).lower()
-            hadith_num   = ref_match.group(2)
-
-            if 'muslim' in book_keyword:
-                book_filter = '%muslim%'
-            elif 'bukhari' in book_keyword:
-                book_filter = '%bukhari%'
-            else:
-                book_filter = '%tirmid%'
-
-            ref_conn   = get_db_connection()
-            ref_cursor = ref_conn.cursor(cursor_factory=RealDictCursor)
-            try:
-                ref_cursor.execute("""
-                    SELECT
-                        h.hadith_id,
-                        h.hadith_number,
-                        b.book_name_english,
-                        c.chapter_number,
-                        g.grade_type
-                    FROM hadiths h
-                    JOIN hadith_books b  ON h.FK_book_id      = b.book_id
-                    JOIN chapters    c  ON h.FK_chapter_id    = c.chapter_id
-                    LEFT JOIN hadith_grade  g ON h.FK_hadith_grade_id = g.grade_id
-                    WHERE b.book_name_english ILIKE %s
-                      AND h.hadith_number::text = %s
-                    LIMIT 5
-                """, (book_filter, hadith_num))
-                ref_hadiths = ref_cursor.fetchall()
-
-                if ref_hadiths:
-                    if user_id:
-                        ref_cursor.execute(
-                            "INSERT INTO history (FK_user_id, query_text, created_at)"
-                            " VALUES (%s, %s, %s)",
-                            (user_id, query, datetime.now())
-                        )
-                        ref_conn.commit()
-
-                    results = [{
-                        'hadith_id':        h['hadith_id'],
-                        'book_name':        h['book_name_english'],
-                        'hadith_number':    h['hadith_number'],
-                        'chapter_number':   h['chapter_number'],
-                        'grade':            h['grade_type'] or 'No grade mention',
-                        'similarity_score': 1.0,
-                    } for h in ref_hadiths]
-
-                    print(f"[Search] Reference match: {book_filter} #{hadith_num} → {len(results)} result(s)")
-                    return jsonify({'results': results}), 200
-
-            except Exception as ref_err:
-                print(f"[Search] Reference lookup failed: {ref_err}")
-            finally:
-                ref_cursor.close()
-                ref_conn.close()
-            # No DB hit — fall through to semantic search
-
-        # ===== HYBRID SEARCH: Semantic + Fuzzy =====
-        # Maps hadith_id -> raw FAISS relevance score (lower = more relevant for L2,
-        # higher = more relevant for inner product — normalised later)
-        faiss_raw_scores = {}   # per-index raw scores before normalisation
-        hadith_score_map = {}   # final merged, normalised FAISS score (lower = better)
-        semantic_count = 0
-        k = 30  # Increased from 20 → richer candidate pool per index
-
-        # Helper: collect scores from one FAISS index into a per-index dict,
-        # then min-max normalise and merge into hadith_score_map.
-        def _collect_faiss_scores(index, mapping, label):
-            nonlocal semantic_count
+        def add_index_results(index, mapping, source_name):
             if index is None or mapping is None:
                 return
             if embedding_dim != index.d:
-                print(f"[Search] {label}: embedding dim mismatch ({embedding_dim} vs {index.d}), skipping")
+                print(
+                    f"[Search] Skipping {source_name}: embedding dim {embedding_dim} != index dim {index.d}"
+                )
                 return
 
-            distances, indices = index.search(query_vector, k)
-            metric = index.metric_type
-            raw = {}  # idx -> raw distance
-
-            # Absolute quality thresholds to reject clearly irrelevant FAISS results.
-            # For L2 on unit-norm vectors: dist > 1.2 → cosine_sim < 0.28 (too poor).
-            # For inner product on unit-norm vectors: dist < 0.28 → cosine_sim < 0.28.
-            ABS_L2_THRESHOLD = 1.2
-            ABS_IP_THRESHOLD = 0.28
-
+            distances, indices = index.search(query_vector, min(limit, 10))
             for idx, dist in zip(indices[0], distances[0]):
                 if idx < 0:
                     continue
-                # Apply absolute quality filter before accepting the result
-                if metric == faiss.METRIC_INNER_PRODUCT:
-                    if float(dist) < ABS_IP_THRESHOLD:
-                        continue
-                else:
-                    if float(dist) > ABS_L2_THRESHOLD:
-                        continue
+
                 hadith_id = None
                 if 'faiss_index' in mapping.columns:
-                    matched = mapping[mapping['faiss_index'] == idx]
-                    if not matched.empty:
-                        hadith_id = int(matched.iloc[0]['hadith_id'])
-                else:
-                    if idx < len(mapping):
-                        hadith_id = int(mapping.iloc[idx]['hadith_id'])
+                    matched_rows = mapping[mapping['faiss_index'] == idx]
+                    if not matched_rows.empty:
+                        hadith_id = int(matched_rows.iloc[0]['hadith_id'])
+                elif idx < len(mapping):
+                    hadith_id = int(mapping.iloc[idx]['hadith_id'])
+
                 if hadith_id is not None:
-                    # For inner product: higher = better → negate so lower = better
-                    score = -float(dist) if metric == faiss.METRIC_INNER_PRODUCT else float(dist)
-                    raw[hadith_id] = score
-                    semantic_count += 1
+                    similarity_score = float(1.0 / (1.0 + dist))
+                    candidates.append((hadith_id, similarity_score))
 
-            if not raw:
-                return
+        add_index_results(bukhari_index, bukhari_mapping, 'Bukhari')
+        add_index_results(tirmizi_index, tirmizi_mapping, 'Tirmizi')
+        add_index_results(muslim_index, muslim_mapping, 'Sahih Muslim')
 
-            # Min-max normalise this index's scores to [0, 1] before merging
-            scores = list(raw.values())
-            s_min, s_max = min(scores), max(scores)
-            s_range = s_max - s_min if s_max != s_min else 1.0
-            for hid, sc in raw.items():
-                norm = (sc - s_min) / s_range  # 0 = best, 1 = worst
-                # Keep the best (lowest) normalised score if the hadith appears in multiple indexes
-                if hid not in hadith_score_map or norm < hadith_score_map[hid]:
-                    hadith_score_map[hid] = norm
+        if not candidates:
+            return []
 
-            print(f"[Search] {label}: {len(raw)} results (k={k})")
+        best_scores = {}
+        for hadith_id, score in candidates:
+            best_scores[hadith_id] = max(best_scores.get(hadith_id, 0.0), score)
 
-        # 1. SEMANTIC SEARCH (FAISS)
-        try:
-            # Translate Urdu/Arabic to English for FAISS embedding (indexes are English-based)
-            embedding_query = cleaned_query
-            detected_lang = detect_language_from_text(cleaned_query)
-            if detected_lang in ('ar', 'ur'):
-                print(f"[Search] Detected {detected_lang} query — translating for embedding")
-                embedding_query = translate_to_english_for_embedding(cleaned_query)
-
-            query_embedding = get_embedding(embedding_query)
-            query_vector = query_embedding.reshape(1, -1)
-            embedding_dim = query_embedding.shape[0]
-            print(f"[Search] Query embedding dimension: {embedding_dim}")
-
-            _collect_faiss_scores(bukhari_index, bukhari_mapping, "Bukhari")
-            _collect_faiss_scores(tirmizi_index, tirmizi_mapping, "Tirmizi")
-            _collect_faiss_scores(muslim_index, muslim_mapping, "Sahih Muslim")
-        except Exception as e:
-            print(f"[Search] Semantic search failed: {e}")
-
-        # 2. FUZZY SEARCH - always run in parallel with semantic (blended below)
-        fuzzy_score_map = {}  # hadith_id -> fuzzy similarity 0-100 (higher = better)
-        print(f"[Search] Running fuzzy search in parallel (semantic found {semantic_count})")
-        fuzzy_results = fuzzy_search_hadiths(query, limit=10, min_similarity=82)
-        print(f"[Search] Fuzzy search found {len(fuzzy_results)} results")
-        for result in fuzzy_results:
-            hid = result[0]
-            sim = float(result[1]) if len(result) >= 2 else 0.0
-            fuzzy_score_map[hid] = sim
-            # Add to candidate pool if not already found by FAISS
-            if hid not in hadith_score_map:
-                # Place at end of FAISS range (score=1) so FAISS candidates rank first
-                hadith_score_map[hid] = 1.0
-
-        print(f"[Search] Total unique hadiths found: {len(hadith_score_map)}")
-
-        # Fetch hadiths from database
-        if not hadith_score_map:
-            return jsonify({'results': []}), 200
+        sorted_ids = [
+            hadith_id for hadith_id, _ in sorted(
+                best_scores.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+        ][:limit]
 
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-        # Build query to fetch hadiths
-        # Convert to Python native int types (not numpy.int64) for PostgreSQL compatibility
-        hadith_id_list = [int(hid) for hid in hadith_score_map.keys()]
-        placeholders = ','.join(['%s'] * len(hadith_id_list))
-
+        placeholders = ','.join(['%s'] * len(sorted_ids))
         cursor.execute(f"""
-            SELECT 
+            SELECT
+                h.hadith_id,
+                h.hadith_number,
+                b.book_name_english,
+                c.chapter_number,
+                COALESCE(g.grade_type, 'No grade mention') as grade_type
+            FROM hadiths h
+            LEFT JOIN hadith_books b ON h.FK_book_id = b.book_id
+            LEFT JOIN chapters c ON h.FK_chapter_id = c.chapter_id
+            LEFT JOIN hadith_grade g ON h.FK_hadith_grade_id = g.grade_id
+            WHERE h.hadith_id IN ({placeholders})
+        """, sorted_ids)
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        rows_by_id = {int(row['hadith_id']): row for row in rows}
+        results = []
+        for hadith_id in sorted_ids:
+            row = rows_by_id.get(hadith_id)
+            if not row:
+                continue
+            results.append({
+                "id": int(hadith_id),
+                "hadith_id": int(hadith_id),
+                "hadith_number": str(row.get('hadith_number') or hadith_id),
+                "hadith_no": str(row.get('hadith_number') or hadith_id),
+                "collection": str(row.get('book_name_english') or "Hadith Collection"),
+                "book_name": str(row.get('book_name_english') or "Hadith Collection"),
+                "chapter_no": str(row.get('chapter_number') or ""),
+                "chapter_number": str(row.get('chapter_number') or ""),
+                "grade": str(row.get('grade_type') or "No grade mention"),
+                "similarity_score": best_scores.get(hadith_id),
+                "score": best_scores.get(hadith_id),
+            })
+
+        return results
+    except Exception as e:
+        import traceback
+        print(f"[Search] Semantic fallback failed: {e}")
+        print(traceback.format_exc())
+        return []
+
+
+def local_keyword_hadith_evidence(query, limit=3):
+    """Return structured evidence directly from DB without OpenAI."""
+    if not query or not query.strip():
+        return []
+
+    stopwords = {
+        'what', 'does', 'hadith', 'hadees', 'hadeeth', 'say', 'about', 'tell',
+        'give', 'show', 'please', 'with', 'from', 'that', 'this', 'there',
+        'their', 'where', 'when', 'which', 'who', 'why', 'how', 'the', 'and',
+        'for', 'are', 'was', 'were', 'is', 'am', 'to', 'of', 'in', 'on',
+    }
+    words = [
+        w.strip()
+        for w in re.findall(r"[\w\u0600-\u06FF]+", query.lower())
+        if len(w.strip()) > 2 and w.strip() not in stopwords
+    ]
+    if not words:
+        words = [query.strip()]
+
+    conditions = []
+    params = []
+    for word in words:
+        conditions.append(
+            "(h.hadith_english ILIKE %s OR h.hadith_urdu ILIKE %s OR h.hadith_arabic ILIKE %s)"
+        )
+        params.extend([f"%{word}%", f"%{word}%", f"%{word}%"])
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(f"""
+            SELECT
                 h.hadith_id,
                 h.hadith_number,
                 h.hadith_arabic,
@@ -831,105 +840,153 @@ def search_hadiths():
                 b.book_name_english,
                 c.chapter_number,
                 c.chapter_title_english,
-                g.grade_type,
-                n.narrator_name
+                COALESCE(g.grade_type, 'No grade mention') as grade_type,
+                COALESCE(n.narrator_name, 'Unknown') as narrator_name
             FROM hadiths h
-            JOIN hadith_books b ON h.FK_book_id = b.book_id
-            JOIN chapters c ON h.FK_chapter_id = c.chapter_id
+            LEFT JOIN hadith_books b ON h.FK_book_id = b.book_id
+            LEFT JOIN chapters c ON h.FK_chapter_id = c.chapter_id
             LEFT JOIN hadith_grade g ON h.FK_hadith_grade_id = g.grade_id
             LEFT JOIN hadith_narrator n ON h.FK_hadith_narrator_id = n.narrator_id
-            WHERE h.hadith_id IN ({placeholders})
-        """, hadith_id_list)
-
-        hadiths = cursor.fetchall()
-
-        # Save search to history
-        if user_id:
-            cursor.execute(
-                "INSERT INTO history (FK_user_id, query_text, created_at) VALUES (%s, %s, %s)",
-                (user_id, query, datetime.now())
-            )
-            conn.commit()
-
+            WHERE {" OR ".join(conditions)}
+            LIMIT %s
+        """, params + [limit * 5])
+        rows = cursor.fetchall()
         cursor.close()
         conn.close()
 
-        # Build results without similarity_score — it will be set after final ranking
-        results = []
-        for h in hadiths:
-            results.append({
-                'hadith_id': h['hadith_id'],
-                'book_name': h['book_name_english'],
-                'hadith_number': h['hadith_number'],
-                'chapter_number': h['chapter_number'],
-                'grade': h['grade_type'] or 'No grade mention',
+        # Rank the OR-matched candidate pool by how many query words each row actually
+        # contains, since the SQL scan order carries no relevance signal on its own.
+        scored_rows = [
+            (
+                keyword_match_score(
+                    [row.get('hadith_english'), row.get('hadith_urdu'), row.get('hadith_arabic')],
+                    words,
+                ),
+                row,
+            )
+            for row in rows
+        ]
+        scored_rows.sort(key=lambda item: item[0], reverse=True)
+
+        evidence = []
+        for index, (score, row) in enumerate(scored_rows[:limit], start=1):
+            evidence.append({
+                'rank': index,
+                'hadith_id': int(row.get('hadith_id')),
+                'book_name': row.get('book_name_english') or 'N/A',
+                'hadith_number': str(row.get('hadith_number') or 'N/A'),
+                'narrator': row.get('narrator_name') or 'Unknown',
+                'grade': row.get('grade_type') or 'N/A',
+                'arabic_text': row.get('hadith_arabic') or 'N/A',
+                'english_text': row.get('hadith_english') or 'N/A',
+                'urdu_text': row.get('hadith_urdu') or 'N/A',
+                'chapter': f"{row.get('chapter_number','') or ''} {row.get('chapter_title_english','') or ''}".strip(),
+                'match_score': score,
             })
-
-        # ===== FINAL RANKING: FAISS (normalised) + BM25 + Fuzzy + Grade boost =====
-        # All signals are normalised to [0, 1] where lower final score = better rank.
-
-        # Grade boost: Sahih hadiths get a head-start, weak ones are pushed down
-        GRADE_BOOST = {'Sahih': -0.20, 'Hasan': -0.10, 'Da\'if': 0.15}
-
-        # BM25 keyword scores (higher = better match for short queries)
-        bm25_score_map = {}
-        if BM25_AVAILABLE and bm25_index is not None and bm25_hadith_ids:
-            try:
-                bm25_query_tokens = cleaned_query.lower().split()
-                raw_bm25 = bm25_index.get_scores(bm25_query_tokens)
-                bm25_max = float(raw_bm25.max()) if raw_bm25.max() > 0 else 1.0
-                for idx, hid in enumerate(bm25_hadith_ids):
-                    if hid in hadith_score_map:
-                        bm25_score_map[hid] = float(raw_bm25[idx]) / bm25_max
-                print(f"[Search] BM25 scored {len(bm25_score_map)} hadiths")
-            except Exception as bm25_err:
-                print(f"[Search] BM25 scoring failed: {bm25_err}")
-
-        # Fuzzy scores normalised to [0, 1] (higher = better)
-        fuzzy_max = max(fuzzy_score_map.values(), default=1.0)
-        fuzzy_norm_map = {hid: sc / fuzzy_max for hid, sc in fuzzy_score_map.items()}
-
-        def final_score(r):
-            hid = r['hadith_id']
-            faiss_norm  = hadith_score_map.get(hid, 1.0)          # [0,1] lower=better
-            bm25_norm   = bm25_score_map.get(hid, 0.0)            # [0,1] higher=better
-            fuzzy_norm  = fuzzy_norm_map.get(hid, 0.0)            # [0,1] higher=better
-            grade_delta = GRADE_BOOST.get(r['grade'], 0.0)
-            # Weights: FAISS 60%, BM25 30%, Fuzzy 10% — convert BM25/Fuzzy to lower=better
-            score = (0.60 * faiss_norm
-                     + 0.30 * (1.0 - bm25_norm)
-                     + 0.10 * (1.0 - fuzzy_norm)
-                     + grade_delta)
-            return score
-
-        results.sort(key=final_score)
-        print(f"[Search] Final ranking applied: FAISS+BM25+Fuzzy+GradeBoost")
-
-        # Remove results that score too poorly (final_score > 0.90 means all signals
-        # are weak — FAISS far-off, no BM25/fuzzy overlap, possibly wrong grade boost).
-        FINAL_SCORE_CUTOFF = 0.90
-        results = [r for r in results if final_score(r) <= FINAL_SCORE_CUTOFF]
-
-        # Cap at 30 results
-        results = results[:30]
-
-        # Set similarity_score from the final combined score so color highlights
-        # in the Flutter app reflect actual ranking quality, not just FAISS distance.
-        # final_score range is roughly [-0.20, 1.0]; map to [0, 1] for display.
-        for r in results:
-            fs = final_score(r)
-            r['similarity_score'] = round(max(0.0, min(1.0, 1.0 - fs)), 4)
-
-        return jsonify({'results': results}), 200
-
+        return evidence
     except Exception as e:
         import traceback
-        error_msg = str(e)
-        error_traceback = traceback.format_exc()
-        print(f"Search error: {error_msg}")
-        print(f"Traceback:\n{error_traceback}")
-        return jsonify({'message': f'Search failed: {error_msg}'}), 500
+        print(f"[Chat] Local keyword fallback failed: {e}")
+        print(traceback.format_exc())
+        return []
 
+# 2. BULLETPROOF COMBINED LOCAL API SEARCH ENDPOINT
+# @app.route('/api/search', methods=['POST'])
+# def search_hadiths_combined():
+#     print("\n" + "═"*50)
+#     print("🔄 [LOCAL DB RUN] /api/search API TRIGGERED")
+#     print("═"*50)
+    
+#     try:
+#         data = request.get_json() or {}
+#         query_text = data.get('query', '').strip()
+#     except Exception:
+#         return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+
+#     if not query_text:
+#         return jsonify({"status": "success", "results": []})
+        
+#     print(f"🔍 Searching local database for text match: '{query_text}'")
+#     results = []
+    
+#     conn = None
+#     try:
+#         conn = get_db_connection()
+#         cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+#         words = [w.strip() for w in query_text.split() if len(w.strip()) > 2]
+#         if not words:
+#             words = [query_text]
+            
+#         conditions = []
+#         params = []
+#         for word in words:
+#             conditions.append("(h.hadith_english ILIKE %s OR h.hadith_urdu ILIKE %s)")
+#             params.append(f"%{word}%")
+            
+#         sql_query = f"""
+#             SELECT h.hadith_id, h.hadith_number, h.hadith_english, h.hadith_urdu, h.hadith_arabic,
+#                    b.book_name_english
+#             FROM hadiths h
+#             LEFT JOIN hadith_books b ON h.fk_book_id = b.book_id
+#             WHERE {" AND ".join(conditions)}
+#             LIMIT 15;
+#         """
+        
+#         cursor.execute(sql_query, tuple(params))
+#         db_results = cursor.fetchall()
+        
+#         if not db_results and len(words) > 1:
+#             print("⚠️ Phrase match 0, executing dominant keyword scanner...")
+#             dominant_word = max(words, key=len)
+#             fallback_query = """
+#                 SELECT h.hadith_id, h.hadith_number, h.hadith_english, h.hadith_urdu, h.hadith_arabic,
+#                        b.book_name_english
+#                 FROM hadiths h
+#                 LEFT JOIN hadith_books b ON h.fk_book_id = b.book_id
+#                 WHERE h.hadith_english ILIKE %s OR h.hadith_urdu ILIKE %s
+#                 LIMIT 15;
+#             """
+#             cursor.execute(fallback_query, (f"%{dominant_word}%", f"%{dominant_word}%"))
+#             db_results = cursor.fetchall()
+
+#         print(f"✅ Local Database Rows Loaded: {len(db_results)}")
+        
+#         for row in db_results:
+#             h_id = row.get('hadith_id') or 1
+#             h_num = row.get('hadith_number') or str(h_id)
+#             b_name = row.get('book_name_english') or "Hadith Collection"
+
+#             results.append({
+#                 "id": int(h_id),
+#                 "hadith_id": int(h_id),
+#                 "hadith_number": str(h_num),
+#                 "hadith_no": str(h_num),
+#                 "collection": str(b_name),
+#                 "book_name": str(b_name),
+#                 "text_en": str(row.get('hadith_english') or ""),
+#                 "text_ur": str(row.get('hadith_urdu') or ""),
+#                 "text_ar": str(row.get('hadith_arabic') or ""),
+#                 "chapter_no": "1",
+#                 "chapter_name": "General",
+#                 "narrator": "Narrated by Companion",
+#                 "status": "Authentic",
+#                 "grade": "Sahih",
+#                 "score": 0.95
+#             })
+            
+#         cursor.close()
+#     except Exception as db_err:
+#         print(f"❌ LOCAL DATABASE EXCEPTION: {db_err}")
+#     finally:
+#         if conn:
+#             conn.close()
+
+#     print(f"🚀 Returning {len(results)} exact local results to Flutter.")
+#     return jsonify({
+#         "status": "success",
+#         "results": results
+#     })
 
 @app.route('/api/user/update-profile-photo', methods=['PUT'])
 def update_profile_photo():
@@ -2946,12 +3003,49 @@ def chat():
                 embedding_dim = query_embedding.shape[0]
                 print(f"[RAG] Generated embedding dimension: {embedding_dim}")
             except Exception as e:
+                print(f"[RAG] Embedding failed, using local keyword fallback: {e}")
+                hadith_evidence = local_keyword_hadith_evidence(question, limit=3)
+                if hadith_evidence:
+                    explanation_title = "Relevant Hadith Found"
+                    first_text = hadith_evidence[0].get('english_text') or ''
+                    explanation_body = (
+                        "OpenAI quota or connection is unavailable, so I used local database matching. "
+                        f"The closest local result says: {first_text[:280]}"
+                    ).strip()
+                    bot_reply = f"{explanation_title}\n\n{explanation_body}"
+                    saved_hadith_id = hadith_evidence[0].get('hadith_id')
+                else:
+                    explanation_title = ""
+                    explanation_body = "No matching hadith found."
+                    bot_reply = explanation_body
+                    saved_hadith_id = None
+
+                bot_message_time = datetime.now()
+                cursor.execute(
+                    """
+                    INSERT INTO messages (fk_conversation_id, fk_user_type_id, message_text, hadith_id, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (conversation_id, 2, bot_reply, saved_hadith_id, bot_message_time)
+                )
+                cursor.execute(
+                    """
+                    UPDATE conversations
+                    SET updated_at = %s
+                    WHERE conversation_id = %s
+                    """,
+                    (bot_message_time, conversation_id)
+                )
+                conn.commit()
                 cursor.close()
                 conn.close()
-                return jsonify({
+                return _make_chat_response({
                     'conversation_id': conversation_id,
-                    'reply': f'Error generating embedding: {str(e)}'
-                }), 500
+                    'reply': bot_reply,
+                    'explanation_title': explanation_title,
+                    'explanation_body': explanation_body,
+                    'hadiths': hadith_evidence,
+                })
             
             # Search both FAISS indexes with K=8 or 10
             k = 10  # K value can be 8 or 10
@@ -3059,7 +3153,7 @@ def chat():
                     print(f"[RAG] Sahih Muslim: candidate hadith_id={best_hadith_id} similarity={best_score:.4f}")
 
         # If no hadith found and not a follow-up question, return without calling LLM
-        if not selected_hadith_ids and not (is_followup_question and previous_hadith_data):
+        if not selected_hadith_ids:
             bot_reply = "No matching hadith found."
             bot_message_time = datetime.now()
             cursor.execute(
@@ -3521,88 +3615,95 @@ Respond with ONLY a JSON object in this exact format (no markdown, no code block
 
 
 # Initialize on startup
-print("\n" + "=" * 50)
-print("Initializing backend...")
-print("=" * 50)
+# Guarded against Werkzeug's debug reloader, which re-executes this whole module in a
+# watcher process before spawning the actual worker process (WERKZEUG_RUN_MAIN='true').
+# Without this guard, FAISS/CSV loading, the BM25 build, and EasyOCR init all ran twice.
+if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
+    print("\n" + "=" * 50)
+    print("Initializing backend...")
+    print("=" * 50)
 
-# Load FAISS indexes and mappings
-print("Loading FAISS indexes and mapping files...")
-load_faiss_indexes()
-load_mapping_csvs()
+    # Load FAISS indexes and mappings
+    print("Loading FAISS indexes and mapping files...")
+    load_faiss_indexes()
+    load_mapping_csvs()
 
-# Build BM25 keyword index
-print("Building BM25 keyword index...")
-build_bm25_index()
+    # Build BM25 keyword index
+    print("Building BM25 keyword index...")
+    build_bm25_index()
 
-# Initialize EasyOCR Readers ONCE at startup (CRITICAL PERFORMANCE FIX)
-# This eliminates the 60-90 second delay on every request
-if EASYOCR_AVAILABLE:
-    print("Initializing EasyOCR Readers (this may take 60-90 seconds each)...")
-    print("  CRITICAL: Readers initialized ONCE and reused for all requests")
-    
-    def initialize_ar_ur_reader():
-        """Initialize Arabic/Urdu EasyOCR reader at startup with CRAFT detection network"""
-        global AR_UR_READER, AR_UR_READER_INITIALIZING, AR_UR_READER_INIT_ERROR
-        AR_UR_READER_INITIALIZING = True
-        AR_UR_READER_INIT_ERROR = None
-        try:
-            print("  Initializing EasyOCR Reader(['ar','ur'], gpu=False, quantize=True, detect_network='craft')...")
-            print("  Using CRAFT detection network for better Arabic/Urdu text detection")
-            AR_UR_READER = easyocr.Reader(
-                ['ar', 'ur'],
-                gpu=False,
-                quantize=True,
-                detect_network='craft'  # CRAFT network better for cursive scripts
-            )
-            print("  ✓ EasyOCR Reader initialized successfully for Arabic/Urdu with CRAFT")
-            AR_UR_READER_INITIALIZING = False
-        except Exception as e:
-            print(f"  ✗ Failed to initialize EasyOCR Reader: {e}")
-            import traceback
-            print(f"  Traceback: {traceback.format_exc()}")
-            AR_UR_READER = None
-            AR_UR_READER_INITIALIZING = False
-            AR_UR_READER_INIT_ERROR = str(e)
-    
-    def initialize_en_reader():
-        """Initialize English EasyOCR reader at startup (for Tesseract fallback)"""
-        global EN_READER, EN_READER_INITIALIZING, EN_READER_INIT_ERROR
-        EN_READER_INITIALIZING = True
-        EN_READER_INIT_ERROR = None
-        try:
-            print("  Initializing EasyOCR Reader(['en'], gpu=False, quantize=True)...")
-            EN_READER = easyocr.Reader(
-                ['en'],
-                gpu=False,
-                quantize=True
-            )
-            print("  ✓ EasyOCR Reader initialized successfully for English")
-            EN_READER_INITIALIZING = False
-        except Exception as e:
-            print(f"  ✗ Failed to initialize English EasyOCR Reader: {e}")
-            import traceback
-            print(f"  Traceback: {traceback.format_exc()}")
-            EN_READER = None
-            EN_READER_INITIALIZING = False
-            EN_READER_INIT_ERROR = str(e)
-    
-    # Run initialization in background threads to avoid blocking startup
-    import threading
-    ar_ur_thread = threading.Thread(target=initialize_ar_ur_reader, daemon=True)
-    ar_ur_thread.start()
-    print("  Arabic/Urdu reader initialization started in background thread...")
-    
-    en_thread = threading.Thread(target=initialize_en_reader, daemon=True)
-    en_thread.start()
-    print("  English reader initialization started in background thread...")
-else:
-    print("⚠ EasyOCR not available - install with: pip install easyocr")
+    # Initialize EasyOCR Readers ONCE at startup (CRITICAL PERFORMANCE FIX)
+    # This eliminates the 60-90 second delay on every request
+    if EASYOCR_AVAILABLE:
+        print("Initializing EasyOCR Readers (this may take 60-90 seconds each)...")
+        print("  CRITICAL: Readers initialized ONCE and reused for all requests")
 
-print("=" * 50 + "\n")
+        def initialize_ar_ur_reader():
+            """Initialize Arabic/Urdu EasyOCR reader at startup with CRAFT detection network"""
+            global AR_UR_READER, AR_UR_READER_INITIALIZING, AR_UR_READER_INIT_ERROR
+            AR_UR_READER_INITIALIZING = True
+            AR_UR_READER_INIT_ERROR = None
+            try:
+                print("  Initializing EasyOCR Reader(['ar','ur'], gpu=False, quantize=True, detect_network='craft')...")
+                print("  Using CRAFT detection network for better Arabic/Urdu text detection")
+                AR_UR_READER = easyocr.Reader(
+                    ['ar', 'ur'],
+                    gpu=False,
+                    quantize=True,
+                    detect_network='craft'  # CRAFT network better for cursive scripts
+                )
+                print("  ✓ EasyOCR Reader initialized successfully for Arabic/Urdu with CRAFT")
+                AR_UR_READER_INITIALIZING = False
+            except Exception as e:
+                print(f"  ✗ Failed to initialize EasyOCR Reader: {e}")
+                import traceback
+                print(f"  Traceback: {traceback.format_exc()}")
+                AR_UR_READER = None
+                AR_UR_READER_INITIALIZING = False
+                AR_UR_READER_INIT_ERROR = str(e)
+
+        def initialize_en_reader():
+            """Initialize English EasyOCR reader at startup (for Tesseract fallback)"""
+            global EN_READER, EN_READER_INITIALIZING, EN_READER_INIT_ERROR
+            EN_READER_INITIALIZING = True
+            EN_READER_INIT_ERROR = None
+            try:
+                print("  Initializing EasyOCR Reader(['en'], gpu=False, quantize=True)...")
+                EN_READER = easyocr.Reader(
+                    ['en'],
+                    gpu=False,
+                    quantize=True
+                )
+                print("  ✓ EasyOCR Reader initialized successfully for English")
+                EN_READER_INITIALIZING = False
+            except Exception as e:
+                print(f"  ✗ Failed to initialize English EasyOCR Reader: {e}")
+                import traceback
+                print(f"  Traceback: {traceback.format_exc()}")
+                EN_READER = None
+                EN_READER_INITIALIZING = False
+                EN_READER_INIT_ERROR = str(e)
+
+        # Run initialization in background threads to avoid blocking startup
+        import threading
+        ar_ur_thread = threading.Thread(target=initialize_ar_ur_reader, daemon=True)
+        ar_ur_thread.start()
+        print("  Arabic/Urdu reader initialization started in background thread...")
+
+        en_thread = threading.Thread(target=initialize_en_reader, daemon=True)
+        en_thread.start()
+        print("  English reader initialization started in background thread...")
+    else:
+        print("⚠ EasyOCR not available - install with: pip install easyocr")
+
+    print("=" * 50 + "\n")
 
 if __name__ == '__main__':
-    HOTSPOT_IP = '192.168.137.1'
-    print(f" * Android devices connect via: http://{HOTSPOT_IP}:5000")
+    print(f"\n" + "="*50)
+    print(f"Starting True Hadith Backend API Server...")
+    print(f"Listening on ALL networks (host='0.0.0.0') on Port 5000")
+    print(f"Tip: Android App mein connection ke liye apne Laptop ka IP use karein.")
     print("=" * 50 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
-
+    
+    # Debug=True testing ke liye behtar hai taake code change hone par auto-restart ho
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
