@@ -54,7 +54,7 @@ except (ImportError, OSError) as e:
 load_dotenv(override=True)
 
 app = Flask(__name__)
-app.debug = True  # kept in sync with app.run(debug=True) below; used by the reloader guard
+app.debug = os.getenv('FLASK_DEBUG', 'true').lower() == 'true'  # kept in sync with app.run() below; used by the reloader guard
 CORS(app, origins=[
     "http://192.168.137.1:5000",
     "http://192.168.100.12:5000",
@@ -3699,11 +3699,12 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
     print("=" * 50 + "\n")
 
 if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('FLASK_DEBUG', 'true').lower() == 'true'
     print(f"\n" + "="*50)
     print(f"Starting True Hadith Backend API Server...")
-    print(f"Listening on ALL networks (host='0.0.0.0') on Port 5000")
+    print(f"Listening on ALL networks (host='0.0.0.0') on Port {port}")
     print(f"Tip: Android App mein connection ke liye apne Laptop ka IP use karein.")
     print("=" * 50 + "\n")
-    
-    # Debug=True testing ke liye behtar hai taake code change hone par auto-restart ho
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+
+    app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)
