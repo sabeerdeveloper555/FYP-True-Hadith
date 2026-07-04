@@ -1,4 +1,5 @@
 package org.truehadith.app
+import android.content.Intent
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
@@ -14,9 +15,19 @@ import java.nio.ByteBuffer
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "com.example.true_hadith/audio_trim"
     private val WA_CHANNEL = "com.example.true_hadith/whatsapp"
+    private val DEEP_LINK_CHANNEL = "org.truehadith.app/deeplink"
+    private var deepLinkChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+
+        // Explicit bridge for onNewIntent deep links — a fallback for cases
+        // where the app_links plugin's own EventChannel misses delivering
+        // a link received while the Activity was paused/backgrounded.
+        deepLinkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEEP_LINK_CHANNEL)
+        intent?.data?.let { uri ->
+            deepLinkChannel?.invokeMethod("onDeepLink", uri.toString())
+        }
 
         // WhatsApp voice notes channel — queries MediaStore so scoped storage is not an issue
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WA_CHANNEL).setMethodCallHandler { call, result ->
@@ -51,6 +62,13 @@ class MainActivity : FlutterActivity() {
                     result.notImplemented()
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.data?.let { uri ->
+            deepLinkChannel?.invokeMethod("onDeepLink", uri.toString())
         }
     }
 

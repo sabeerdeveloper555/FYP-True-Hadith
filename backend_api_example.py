@@ -208,21 +208,51 @@ def keyword_match_score(text_fields, words):
 
 
 # 2. BULLETPROOF LOCAL API SEARCH ENDPOINT
+def _save_search_history(user_id, query_text):
+    """Record a search query in the history table. Failures are logged but never
+    propagated, since a broken history write shouldn't break the search response."""
+    if not user_id or not query_text:
+        return
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO history (FK_user_id, query_text, created_at)
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, query_text, datetime.now())
+        )
+        conn.commit()
+        cursor.close()
+    except Exception as history_err:
+        print(f"⚠️ Failed to save search history: {history_err}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
+
 @app.route('/api/search', methods=['POST'])
 def search_hadiths_final_local():  # <-- Unique name completely prevents AssertionError
     print("\n" + "═"*50)
     print("🔄 [LOCAL DB RUN] /api/search API TRIGGERED")
     print("═"*50)
-    
+
     try:
         data = request.get_json() or {}
         query_text = data.get('query', '').strip()
+        user_id = data.get('user_id')
     except Exception:
         return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
     if not query_text:
         return jsonify({"status": "success", "results": []})
-        
+
+    _save_search_history(user_id, query_text)
+
     print(f"🔍 Searching local database for text match: '{query_text}'")
     semantic_results = semantic_search_summaries(query_text, limit=15)
     if semantic_results:

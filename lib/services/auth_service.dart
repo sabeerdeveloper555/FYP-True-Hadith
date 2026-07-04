@@ -103,17 +103,18 @@ class AuthService {
   }
 
   /// Send password reset email.
-  /// Firebase uses the Action URL set in Firebase Console → Authentication →
-  /// Templates → Password reset. Set that to: truehadith://reset-password
-  /// so the link opens the app directly via the custom URL scheme.
+  /// The email link always points to Firebase's own action handler
+  /// (https://true-hadith-e3f19.firebaseapp.com/__/auth/action). Opening that
+  /// link directly in the app requires Android App Links verification
+  /// (SHA-256 fingerprint registered in Firebase Console) matching the
+  /// autoVerify intent-filter in AndroidManifest.xml — custom URL schemes
+  /// can't be used here since Firebase Dynamic Links (which used to enable
+  /// that redirect) was shut down.
   static Future<void> sendPasswordResetEmail(String email) async {
     try {
       final ActionCodeSettings actionCodeSettings = ActionCodeSettings(
-        // 1. URL bilkul clean hona chahiye jo Firebase console mein authorized hai
         url: 'https://true-hadith-e3f19.firebaseapp.com',
         handleCodeInApp: true,
-        // 2. Apne android/app/build.gradle wala exact applicationId check karein
-        // Agar aapka package name 'com.example.truehadith' ki jagah kuch aur hai (jaise com.truehadith.app), toh wahi likhein
         androidPackageName: 'org.truehadith.app',
         androidMinimumVersion: '1',
         androidInstallApp: true,

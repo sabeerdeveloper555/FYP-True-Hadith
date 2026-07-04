@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "org.truehadith.app",
+      "sha256_cert_fingerprints": [
+        "A7:6F:6F:67:70:29:CD:33:D9:15:0B:C3:F1:05:E9:6F:59:96:E6:02:E3:A7:66:BE:44:76:73:7B:A9:81:94:82",
+        "59:BA:6B:54:F5:7A:E6:FF:27:CA:61:16:58:E3:60:21:49:CB:8D:07:CF:16:F8:C3:31:5D:E3:64:19:49:3C:6B"
+      ]
+    }
+  }
+]

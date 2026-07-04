@@ -1,6 +1,6 @@
 import 'dart:async';
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -241,16 +241,29 @@ class AuthWrapper extends StatefulWidget {
 }
 
 class _AuthWrapperState extends State<AuthWrapper> {
+  static const MethodChannel _deepLinkChannel =
+      MethodChannel('org.truehadith.app/deeplink');
+
   UserModel? _userData;
   bool _isLoading = true;
   bool _showOnboarding = false;
   bool _onboardingChecked = false;
   StreamSubscription<User?>? _authSubscription;
   StreamSubscription<Uri>? _linkSubscription;
+  String? _lastHandledLink;
 
   @override
   void initState() {
     super.initState();
+
+    // Native-side fallback: MainActivity forwards onNewIntent links here
+    // directly, bypassing the app_links plugin's EventChannel, which can
+    // miss delivering a link received while the Activity was paused.
+    _deepLinkChannel.setMethodCallHandler((call) async {
+      if (call.method == 'onDeepLink' && call.arguments is String) {
+        _handleDeepLink(Uri.parse(call.arguments as String));
+      }
+    });
 
     // Check onboarding status first
     _checkOnboardingStatus();
@@ -289,6 +302,8 @@ class _AuthWrapperState extends State<AuthWrapper> {
 
   void _handleDeepLink(Uri uri) {
     final urlString = uri.toString();
+    if (urlString == _lastHandledLink) return;
+    _lastHandledLink = urlString;
     debugPrint('🔗 Deep link received: $urlString');
 
     // 1. UrlHandler se check karein ke kya yeh password reset URL hai
