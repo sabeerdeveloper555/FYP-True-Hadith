@@ -327,7 +327,12 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _onProfilePhotoUpdated(UserModel updatedUser) {
     setState(() {
-      _currentProfilePhotoUrl = updatedUser.profilePhotoUrl;
+      // Backend reuses the same URL per user on update, so cache-bust it
+      // here too or downstream Image.network widgets will show the old photo.
+      final url = updatedUser.profilePhotoUrl;
+      _currentProfilePhotoUrl = url == null || url.isEmpty
+          ? url
+          : '$url?t=${DateTime.now().millisecondsSinceEpoch}';
     });
     if (widget.onProfilePhotoUpdated != null) {
       widget.onProfilePhotoUpdated!(updatedUser);

@@ -193,8 +193,18 @@ class _ProfilePhotoWidgetState extends State<ProfilePhotoWidget> {
         profilePhotoUrl: downloadUrl,
       );
 
+      // The backend reuses the same filename/URL per user, so the old image
+      // must be evicted from Flutter's image cache or Image.network will
+      // keep showing the stale cached photo for this URL.
+      if (_currentPhotoUrl != null && _currentPhotoUrl!.isNotEmpty) {
+        NetworkImage(_currentPhotoUrl!).evict();
+      }
+      NetworkImage(downloadUrl).evict();
+
       setState(() {
-        _currentPhotoUrl = downloadUrl;
+        // Cache-bust so this load is treated as a new image even though
+        // the underlying URL path is identical to before.
+        _currentPhotoUrl = '$downloadUrl?t=${DateTime.now().millisecondsSinceEpoch}';
         _isUploading = false;
       });
 

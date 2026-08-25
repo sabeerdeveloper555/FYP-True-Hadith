@@ -10,7 +10,13 @@
       "Bash(dart --version)",
       "Bash(git commit *)",
       "PowerShell(python -c \"import sys; print\\(sys.executable\\)\")",
-      "PowerShell(python -m pip install pytesseract 2>&1)"
+      "PowerShell(python -m pip install pytesseract 2>&1)",
+      "PowerShell(gcloud run services describe true-hadith-backend --region us-central1 --format=\"table\\(status.traffic[].revisionName,status.traffic[].percent\\)\")",
+      "PowerShell(gcloud logging read \"resource.type=cloud_run_revision AND resource.labels.revision_name=true-hadith-backend-00005-qcj AND textPayload:FAISS\" --limit=20 --format=\"value\\(textPayload\\)\" --freshness=1d)",
+      "Bash(curl -sS -X POST https://true-hadith-backend-1036448456553.us-central1.run.app/api/search -H 'Content-Type: application/json' -d '{\"user_id\":16,\"query\":\"actions are judged by intention\"}')",
+      "Bash(python -c ' *)",
+      "Read(//c/Users/MUHAMM~1/AppData/Local/Temp/**)",
+      "Bash(./venv/Scripts/python.exe -c ' *)"
     ]
   }
 }

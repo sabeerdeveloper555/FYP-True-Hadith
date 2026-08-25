@@ -3714,15 +3714,18 @@ if not app.debug or os.environ.get('WERKZEUG_RUN_MAIN') == 'true':
                 EN_READER_INITIALIZING = False
                 EN_READER_INIT_ERROR = str(e)
 
-        # Run initialization in background threads to avoid blocking startup
+        # Run both initializations in a single background thread, one after the
+        # other — running them concurrently races on EasyOCR's shared model
+        # download cache (~/.EasyOCR/model/), corrupting the zip for both.
         import threading
-        ar_ur_thread = threading.Thread(target=initialize_ar_ur_reader, daemon=True)
-        ar_ur_thread.start()
-        print("  Arabic/Urdu reader initialization started in background thread...")
 
-        en_thread = threading.Thread(target=initialize_en_reader, daemon=True)
-        en_thread.start()
-        print("  English reader initialization started in background thread...")
+        def initialize_readers_sequentially():
+            initialize_en_reader()
+            initialize_ar_ur_reader()
+
+        readers_thread = threading.Thread(target=initialize_readers_sequentially, daemon=True)
+        readers_thread.start()
+        print("  Reader initialization started in background thread (English, then Arabic/Urdu)...")
     else:
         print("⚠ EasyOCR not available - install with: pip install easyocr")
 

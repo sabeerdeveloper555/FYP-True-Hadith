@@ -68,7 +68,6 @@ Future<void> main() async {
     // Remove native splash and show Flutter immediately.
     // TranslationService init runs in the background — the SplashScreen
     // animation (~4 s) gives it ample time to finish.
-    await OnboardingService.resetOnboarding(); // TEMP: reset for testing
     FlutterNativeSplash.remove();
     runApp(const MyApp());
     TranslationService.instance.init().catchError(

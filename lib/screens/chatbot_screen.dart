@@ -898,7 +898,7 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
                   if (_messageController.text.trim().isNotEmpty)
                     BoxShadow(
                       color: colorScheme.primary.withValues(alpha: 0.3),
-                      blurRadius: 8,
+      blurRadius: 8,
                       offset: const Offset(0, 3),
                     ),
                 ],

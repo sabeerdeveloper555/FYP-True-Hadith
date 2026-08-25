@@ -10,8 +10,12 @@ class ApiService {
   //   flutter build apk --dart-define=BACKEND_URL=https://your-server/api
   // For Android emulator default: http://10.0.2.2:5000/api
   static const String baseUrl = String.fromEnvironment(
+    // 'BACKEND_URL',
+    // defaultValue: 'https://true-hadith-backend-1036448456553.us-central1.run.app/api',
+    
     'BACKEND_URL',
-    defaultValue: 'http://10.102.18.94:5000/api',
+    defaultValue: 'http://10.243.0.94:5000/api',
+    
   );
 
   static Future<UserModel> registerUser({
